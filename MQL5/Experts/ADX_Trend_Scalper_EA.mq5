@@ -354,15 +354,22 @@ void ManageAveraging(ENUM_TREND h1Trend)
   }
 
 //+------------------------------------------------------------------+
-//| Open the first order of a basket: only when flat, H1 has a       |
-//| confirmed trend, and the entry timeframe DI bias agrees with it  |
+//| Open the first order of a NEW basket in the current H1 trend      |
+//| direction. This only checks whether a basket already exists in   |
+//| that same direction (not whether the symbol is flat overall), so |
+//| when H1 flips trend a fresh basket is opened on the new side      |
+//| while any existing basket on the other side is left untouched -  |
+//| it keeps averaging on its own once H1 swings back to agree with  |
+//| it (see ManageAveraging).                                        |
 //+------------------------------------------------------------------+
 void CheckNewEntry(ENUM_TREND h1Trend)
   {
    if(h1Trend == TREND_NONE)
       return;
-   if(TotalPositionsForSymbolMagic() > 0)
-      return;
+
+   double extremePrice;
+   if(CountPositions(h1Trend, extremePrice) > 0)
+      return; // a basket already exists on this side; ManageAveraging handles it
 
    ENUM_TREND entryBias = GetEntryBias();
    if(entryBias == h1Trend)
