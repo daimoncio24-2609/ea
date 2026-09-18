@@ -10,8 +10,8 @@ Expert Advisor for MetaTrader 5: `MQL5/Experts/ADX_Trend_Scalper_EA.mq5`
    - Otherwise, no trend and no new trades are opened.
 2. **Entry (M1 / M5 / M15):** on each new bar of the chosen entry timeframe, ADX is checked on that same timeframe. An order is opened in the H1 trend's direction only when its DI+/DI- bias agrees with that direction, and only when there is no basket already open on that side (BUY and SELL baskets are tracked independently).
 3. **Trend flip → new basket, old basket keeps waiting:** BUY and SELL each have their own basket. When H1 flips trend, a fresh basket is opened straight away on the new side (per point 2), while any basket still open on the other side is left as-is: it is **not** closed and does **not** get new averaging orders while H1 disagrees with it. If H1 later swings back to agree with that older basket, it resumes averaging (point 4) right where it left off. This means BUY and SELL baskets can be open on the same symbol at the same time (hedging), each managed independently.
-4. **Averaging (grid):** once a basket is open, an extra order in the same direction is added every `500` pips of adverse movement (measured from the worst-priced order in that basket), up to `10` open positions per basket (`InpMaxAveragingOrders` applies per side, so BUY and SELL can each hold up to that many). Averaging only continues while the **current** H1 trend still agrees with the basket's direction.
-5. **Exit:** since the strategy has no per-order stop loss (by design — it averages into the position), each basket (BUY and SELL independently) is closed in full once price reaches that basket's volume-weighted average open price plus a small take-profit distance (default 20 pips). Without this, positions would never close.
+4. **Averaging (grid):** once a basket is open, an extra order in the same direction is added every *averaging distance* of adverse movement (measured from the worst-priced order in that basket), up to `10` open positions per basket (`InpMaxAveragingOrders` applies per side, so BUY and SELL can each hold up to that many). Averaging only continues while the **current** H1 trend still agrees with the basket's direction. The distance is **not** a hardcoded "pip" — see the note below on `InpAveragingMode`.
+5. **Exit:** since the strategy has no per-order stop loss (by design — it averages into the position), each basket (BUY and SELL independently) is closed in full once price reaches that basket's volume-weighted average open price plus a take-profit distance in points (`InpTakeProfitPoints`, default 200). Without this, positions would never close.
 6. **Time filter:** new entries and averaging adds only happen inside an allowed day-of-week + intraday time window (broker/server time). On Fridays the window closes earlier (default 14:00) to reduce weekend-gap exposure, regardless of the general end time. Existing baskets can still be closed by the take-profit rule at any time, even outside the window.
 
 ## Key inputs
@@ -23,9 +23,12 @@ Expert Advisor for MetaTrader 5: `MQL5/Experts/ADX_Trend_Scalper_EA.mq5`
 | `InpEntryTimeframe` | M15 | Entry timeframe: M1, M5, or M15 |
 | `InpADXPeriodEntry` | 14 | ADX period on the entry timeframe |
 | `InpLots` | 0.01 | Fixed lot size for every order (initial and averaging) |
-| `InpAveragingPips` | 500 | Distance between averaging orders |
+| `InpAveragingMode` | ATR | `Fixed points` = constant distance; `ATR` = distance scales with H1 volatility |
+| `InpAveragingPoints` | 500 | Distance between averaging orders, in raw broker points (used only when mode = Fixed points) |
+| `InpATRPeriod` | 14 | ATR period on H1 (used only when mode = ATR) |
+| `InpATRMultiplier` | 3.0 | Averaging distance = ATR(H1) × this multiplier (used only when mode = ATR) |
 | `InpMaxAveragingOrders` | 10 | Max open orders per basket |
-| `InpTakeProfitPips` | 20 | Basket close distance from average price |
+| `InpTakeProfitPoints` | 200 | Basket close distance from average price, in raw broker points |
 | `InpMaxSpreadPoints` | 50 | Skip new/averaging entries if spread exceeds this |
 | `InpMagicNumber` | 202609 | Magic number used to identify/manage this EA's orders |
 | `InpSlippagePoints` | 10 | Max allowed slippage on order execution |
@@ -37,6 +40,12 @@ Expert Advisor for MetaTrader 5: `MQL5/Experts/ADX_Trend_Scalper_EA.mq5`
 | `InpUseFridayEarlyClose` | true | On Friday, use `InpFridayEndHour`/`InpFridayEndMinute` instead of `InpEndHour`/`InpEndMinute` as the cutoff for new entries |
 | `InpFridayEndHour` / `InpFridayEndMinute` | 14 / 0 | Friday-only cutoff time for new entries/averaging (broker/server time) |
 
+## Why points/ATR instead of "pips"
+
+Earlier versions measured averaging/take-profit distance in "pips", converted with the standard FX rule (1 pip = 10 points on 3/5-digit symbols). That rule silently breaks on non-forex symbols quoted with 2 decimals, like XAUUSD: `500 pips` was actually only `500 points = $5`, which gold can move through in minutes — baskets filled to the 10-order cap almost immediately with deep floating losses.
+
+The EA now works directly in **broker points** (`InpAveragingPoints`, `InpTakeProfitPoints`) with no pip conversion, plus an **ATR-based mode** (`InpAveragingMode = ATR`, the default) that sizes the averaging distance as `ATR(H1) × InpATRMultiplier` — this adapts automatically to each symbol's real volatility instead of relying on a fixed number that only made sense for one type of instrument. Check the "Averaging distance" line in the on-chart comment to see the live distance being used, and tune `InpATRMultiplier` (or switch to `Fixed points` with a value you've sized for the instrument) to taste.
+
 ## Risk note
 
-This is a martingale-style averaging strategy: with `InpAveragingPips = 500` and `InpMaxAveragingOrders = 10`, a single basket can accumulate significant exposure (up to 5000 pips of adverse movement) before it stops adding orders. There is no hard basket stop loss — size `InpLots` and account balance accordingly. Because BUY and SELL baskets are independent, both sides can be open (hedged) at once on trend flips, so worst-case exposure/margin usage is up to double a single basket's.
+This is a martingale-style averaging strategy: with `InpMaxAveragingOrders = 10`, a single basket can accumulate significant exposure before it stops adding orders. There is no hard basket stop loss — size `InpLots`, the averaging distance, and account balance accordingly. Because BUY and SELL baskets are independent, both sides can be open (hedged) at once on trend flips, so worst-case exposure/margin usage is up to double a single basket's.

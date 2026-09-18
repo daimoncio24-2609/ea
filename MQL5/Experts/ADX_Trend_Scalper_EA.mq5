@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                       ADX_Trend_Scalper_EA.mq5  |
-//|  H1 ADX trend filter + lower-timeframe entry + pip averaging.  |
+//|  H1 ADX trend filter + lower-timeframe entry + point/ATR grid. |
 //+------------------------------------------------------------------+
 #property copyright "Scalping ADX Trend EA"
 #property version   "1.00"
@@ -27,9 +27,17 @@ input int      InpADXPeriodEntry     = 14;      // ADX period on entry timeframe
 //--- Money management / averaging
 input group "=== Lot & Averaging ==="
 input double   InpLots                 = 0.01;  // Lot size (fixed for every order)
-input double   InpAveragingPips        = 500.0; // Distance between averaging orders (pips)
+enum ENUM_AVG_MODE
+  {
+   AVG_MODE_FIXED_POINTS,  // Fixed distance in points
+   AVG_MODE_ATR            // Distance = ATR(H1) * multiplier
+  };
+input ENUM_AVG_MODE InpAveragingMode    = AVG_MODE_ATR; // Averaging distance mode
+input double   InpAveragingPoints      = 500.0; // Fixed distance between averaging orders, in points (used when mode = Fixed points)
+input int      InpATRPeriod            = 14;    // ATR period on H1 (used when mode = ATR)
+input double   InpATRMultiplier        = 3.0;   // Averaging distance = ATR(H1) * this (used when mode = ATR)
 input int      InpMaxAveragingOrders   = 10;    // Max open orders per basket (incl. first)
-input double   InpTakeProfitPips       = 20.0;  // Basket close target from average price (pips)
+input double   InpTakeProfitPoints     = 200.0; // Basket close target from average price, in points
 
 //--- Filters / identification
 input group "=== Filters ==="
@@ -58,6 +66,7 @@ input int      InpFridayEndMinute      = 0;     // Friday cutoff minute (0-59)
 CTrade         trade;
 int            hADX_H1    = INVALID_HANDLE;
 int            hADX_Entry = INVALID_HANDLE;
+int            hATR_H1    = INVALID_HANDLE;
 datetime       g_lastEntryBarTime = 0;
 
 enum ENUM_TREND
@@ -75,10 +84,11 @@ int OnInit()
 
    hADX_H1    = iADX(_Symbol, PERIOD_H1, InpADXPeriodH1);
    hADX_Entry = iADX(_Symbol, (ENUM_TIMEFRAMES)InpEntryTimeframe, InpADXPeriodEntry);
+   hATR_H1    = iATR(_Symbol, PERIOD_H1, InpATRPeriod);
 
-   if(hADX_H1 == INVALID_HANDLE || hADX_Entry == INVALID_HANDLE)
+   if(hADX_H1 == INVALID_HANDLE || hADX_Entry == INVALID_HANDLE || hATR_H1 == INVALID_HANDLE)
      {
-      Print("Failed to create ADX indicator handle(s).");
+      Print("Failed to create indicator handle(s).");
       return(INIT_FAILED);
      }
 
@@ -92,17 +102,27 @@ void OnDeinit(const int reason)
       IndicatorRelease(hADX_H1);
    if(hADX_Entry != INVALID_HANDLE)
       IndicatorRelease(hADX_Entry);
+   if(hATR_H1 != INVALID_HANDLE)
+      IndicatorRelease(hATR_H1);
    Comment("");
   }
 
 //+------------------------------------------------------------------+
-//| Pip size (1 pip = 10 points on 3/5-digit symbols)                |
+//| Distance (in price units) between averaging orders. Using raw    |
+//| broker points (or ATR) instead of an FX-style "pip" avoids        |
+//| misclassifying non-forex symbols (e.g. XAUUSD quoted with 2       |
+//| decimals), where a pip-based distance could end up far smaller    |
+//| than intended.                                                   |
 //+------------------------------------------------------------------+
-double PipSize()
+double AveragingDistance()
   {
-   int    digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-   double point  = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   return (digits == 3 || digits == 5) ? point * 10.0 : point;
+   if(InpAveragingMode == AVG_MODE_ATR)
+     {
+      double atr[];
+      if(CopyBuffer(hATR_H1, 0, 1, 1, atr) > 0 && atr[0] > 0.0)
+         return atr[0] * InpATRMultiplier;
+     }
+   return InpAveragingPoints * _Point;
   }
 
 //+------------------------------------------------------------------+
@@ -306,18 +326,18 @@ void CloseDirection(ENUM_TREND direction)
 //+------------------------------------------------------------------+
 void CheckBasketTakeProfit()
   {
-   double pip = PipSize();
+   double tpDistance = InpTakeProfitPoints * _Point;
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
 
    double volBuy = 0.0;
    double avgBuy = AveragePrice(TREND_BUY, volBuy);
-   if(volBuy > 0.0 && bid >= avgBuy + InpTakeProfitPips * pip)
+   if(volBuy > 0.0 && bid >= avgBuy + tpDistance)
       CloseDirection(TREND_BUY);
 
    double volSell = 0.0;
    double avgSell = AveragePrice(TREND_SELL, volSell);
-   if(volSell > 0.0 && ask <= avgSell - InpTakeProfitPips * pip)
+   if(volSell > 0.0 && ask <= avgSell - tpDistance)
       CloseDirection(TREND_SELL);
   }
 
@@ -332,7 +352,7 @@ void OpenMarket(ENUM_TREND direction, string comment)
   }
 
 //+------------------------------------------------------------------+
-//| Add an averaging order every InpAveragingPips against the        |
+//| Add an averaging order every AveragingDistance() against the     |
 //| existing basket, up to InpMaxAveragingOrders positions total.    |
 //| Only averages while the H1 trend still agrees with the basket's  |
 //| direction, so a trend flip stops the basket from growing further |
@@ -340,14 +360,14 @@ void OpenMarket(ENUM_TREND direction, string comment)
 //+------------------------------------------------------------------+
 void ManageAveraging(ENUM_TREND h1Trend)
   {
-   double pip = PipSize();
+   double distance = AveragingDistance();
    double extremePrice;
 
    int buyCount = CountPositions(TREND_BUY, extremePrice);
    if(buyCount > 0 && buyCount < InpMaxAveragingOrders && h1Trend == TREND_BUY)
      {
       double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      if(ask <= extremePrice - InpAveragingPips * pip)
+      if(ask <= extremePrice - distance)
          OpenMarket(TREND_BUY, "ADX-Scalper avg buy");
      }
 
@@ -355,7 +375,7 @@ void ManageAveraging(ENUM_TREND h1Trend)
    if(sellCount > 0 && sellCount < InpMaxAveragingOrders && h1Trend == TREND_SELL)
      {
       double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      if(bid >= extremePrice + InpAveragingPips * pip)
+      if(bid >= extremePrice + distance)
          OpenMarket(TREND_SELL, "ADX-Scalper avg sell");
      }
   }
@@ -404,8 +424,9 @@ void OnTick()
 
    string trendStr = (h1Trend == TREND_BUY) ? "BUY" : (h1Trend == TREND_SELL) ? "SELL" : "NONE";
    Comment(StringFormat(
-           "ADX Trend Scalper (magic %d)\nH1 trend: %s\nSpread: %d pts (max %d)\nTrading time: %s\nOpen positions: %d",
+           "ADX Trend Scalper (magic %d)\nH1 trend: %s\nSpread: %d pts (max %d)\nTrading time: %s\nAveraging distance: %.0f pts\nOpen positions: %d",
            InpMagicNumber, trendStr, (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD),
-           InpMaxSpreadPoints, timeOK ? "OK" : "closed", TotalPositionsForSymbolMagic()));
+           InpMaxSpreadPoints, timeOK ? "OK" : "closed", AveragingDistance() / _Point,
+           TotalPositionsForSymbolMagic()));
   }
 //+------------------------------------------------------------------+
