@@ -11,7 +11,7 @@
 //--- H1 trend filter (ADX)
 input group "=== Trend Filter (H1 ADX) ==="
 input int      InpADXPeriodH1        = 14;      // ADX period on H1
-input double   InpADXTrendLevel      = 25.0;    // ADX level that confirms a trend
+input double   InpADXTrendLevel      = 25.0;    // Level that ADX AND the weaker DI must both clear to confirm a trend
 
 //--- Entry timeframe
 input group "=== Entry Timeframe ==="
@@ -182,8 +182,10 @@ bool IsWithinTradingTime()
   }
 
 //+------------------------------------------------------------------+
-//| H1 trend: DI+ > DI- and ADX > level => BUY, DI- > DI+ and        |
-//| ADX > level => SELL, otherwise no trend                          |
+//| H1 trend: DI+ > DI- > level and ADX > level => BUY                |
+//|           DI- > DI+ > level and ADX > level => SELL                |
+//| (both DI+ and DI- must clear the level, not just ADX), otherwise  |
+//| no trend                                                           |
 //+------------------------------------------------------------------+
 ENUM_TREND GetH1Trend()
   {
@@ -192,9 +194,9 @@ ENUM_TREND GetH1Trend()
    if(CopyBuffer(hADX_H1, PLUSDI_LINE, 1, 1, plusDI) <= 0)  return TREND_NONE;
    if(CopyBuffer(hADX_H1, MINUSDI_LINE, 1, 1, minusDI) <= 0) return TREND_NONE;
 
-   if(adx[0] > InpADXTrendLevel && plusDI[0] > minusDI[0])
+   if(adx[0] > InpADXTrendLevel && plusDI[0] > minusDI[0] && minusDI[0] > InpADXTrendLevel)
       return TREND_BUY;
-   if(adx[0] > InpADXTrendLevel && minusDI[0] > plusDI[0])
+   if(adx[0] > InpADXTrendLevel && minusDI[0] > plusDI[0] && plusDI[0] > InpADXTrendLevel)
       return TREND_SELL;
    return TREND_NONE;
   }

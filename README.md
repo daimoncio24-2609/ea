@@ -5,8 +5,8 @@ Expert Advisor for MetaTrader 5: `MQL5/Experts/ADX_Trend_Scalper_EA.mq5`
 ## Strategy
 
 1. **Trend filter (H1):** ADX(14) on the H1 chart.
-   - `DI+ > DI-` and `ADX > 25` → trend is **BUY**.
-   - `DI- > DI+` and `ADX > 25` → trend is **SELL**.
+   - `DI+ > DI- > 25` and `ADX > 25` → trend is **BUY** (both DI+ and DI- must clear 25, not just ADX).
+   - `DI- > DI+ > 25` and `ADX > 25` → trend is **SELL**.
    - Otherwise, no trend and no new trades are opened.
 2. **Entry (M1 / M5 / M15):** on each new bar of the chosen entry timeframe, ADX is checked on that same timeframe. An order is opened in the H1 trend's direction only when its DI+/DI- bias agrees with that direction, and only when there is no basket already open on that side (BUY and SELL baskets are tracked independently).
 3. **Trend flip → new basket, old basket keeps waiting:** BUY and SELL each have their own basket. When H1 flips trend, a fresh basket is opened straight away on the new side (per point 2), while any basket still open on the other side is left as-is: it is **not** closed and does **not** get new averaging orders while H1 disagrees with it. If H1 later swings back to agree with that older basket, it resumes averaging (point 4) right where it left off. This means BUY and SELL baskets can be open on the same symbol at the same time (hedging), each managed independently.
@@ -20,7 +20,7 @@ Expert Advisor for MetaTrader 5: `MQL5/Experts/ADX_Trend_Scalper_EA.mq5`
 | Input | Default | Meaning |
 |---|---|---|
 | `InpADXPeriodH1` | 14 | ADX period on H1 |
-| `InpADXTrendLevel` | 25.0 | ADX threshold that confirms a trend |
+| `InpADXTrendLevel` | 25.0 | Level that both ADX and the weaker of DI+/DI- must clear to confirm a trend |
 | `InpEntryTimeframe` | M15 | Entry timeframe: M1, M5, or M15 |
 | `InpADXPeriodEntry` | 14 | ADX period on the entry timeframe |
 | `InpLots` | 0.01 | Fixed lot size for every order (initial and averaging) |
