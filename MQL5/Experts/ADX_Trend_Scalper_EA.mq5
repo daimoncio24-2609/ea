@@ -275,15 +275,18 @@ void OpenMarket(ENUM_TREND direction, string comment)
 
 //+------------------------------------------------------------------+
 //| Add an averaging order every InpAveragingPips against the        |
-//| existing basket, up to InpMaxAveragingOrders positions total     |
+//| existing basket, up to InpMaxAveragingOrders positions total.    |
+//| Only averages while the H1 trend still agrees with the basket's  |
+//| direction, so a trend flip stops the basket from growing further |
+//| against the new H1 bias.                                         |
 //+------------------------------------------------------------------+
-void ManageAveraging()
+void ManageAveraging(ENUM_TREND h1Trend)
   {
    double pip = PipSize();
    double extremePrice;
 
    int buyCount = CountPositions(TREND_BUY, extremePrice);
-   if(buyCount > 0 && buyCount < InpMaxAveragingOrders)
+   if(buyCount > 0 && buyCount < InpMaxAveragingOrders && h1Trend == TREND_BUY)
      {
       double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
       if(ask <= extremePrice - InpAveragingPips * pip)
@@ -291,7 +294,7 @@ void ManageAveraging()
      }
 
    int sellCount = CountPositions(TREND_SELL, extremePrice);
-   if(sellCount > 0 && sellCount < InpMaxAveragingOrders)
+   if(sellCount > 0 && sellCount < InpMaxAveragingOrders && h1Trend == TREND_SELL)
      {
       double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
       if(bid >= extremePrice + InpAveragingPips * pip)
@@ -327,7 +330,7 @@ void OnTick()
 
    if(SpreadOK())
      {
-      ManageAveraging();
+      ManageAveraging(h1Trend);
       if(IsNewEntryBar())
          CheckNewEntry(h1Trend);
      }
