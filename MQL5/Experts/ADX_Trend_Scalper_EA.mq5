@@ -27,7 +27,11 @@ input int      InpADXPeriodEntry     = 14;      // ADX period on entry timeframe
 
 //--- Money management / averaging
 input group "=== Lot & Averaging ==="
-input double   InpLots                 = 0.01;  // Lot size (fixed for every order)
+input double   InpLots                 = 0.01;  // Base/minimum lot size
+input bool     InpUseCompounding        = false; // Scale lot with account balance (compounding)
+input double   InpCompoundingBalanceStep = 100.0; // Balance increment that adds one InpCompoundingLotIncrement (tune to your account!)
+input double   InpCompoundingLotIncrement = 0.01; // Lot added per InpCompoundingBalanceStep of balance
+input double   InpMaxLots               = 1.0;   // Maximum lot size cap (with or without compounding)
 enum ENUM_AVG_MODE
   {
    AVG_MODE_FIXED_POINTS,  // Fixed distance in points
@@ -325,6 +329,64 @@ double AveragePrice(ENUM_TREND direction, double &totalVolume)
   }
 
 //+------------------------------------------------------------------+
+//| Lot size for a brand-new basket. Proportional to the account       |
+//| balance at the start of the day (so it scales down again during   |
+//| a drawdown, not just up), floored at InpLots and capped at        |
+//| InpMaxLots. Every InpCompoundingBalanceStep of balance adds one    |
+//| InpCompoundingLotIncrement -- tune both to your account size.     |
+//+------------------------------------------------------------------+
+double ComputeLotSize()
+  {
+   double lot = InpLots;
+
+   if(InpUseCompounding && InpCompoundingBalanceStep > 0.0)
+     {
+      double balance = (g_dayStartBalance > 0.0) ? g_dayStartBalance : AccountInfoDouble(ACCOUNT_BALANCE);
+      double steps   = MathFloor(balance / InpCompoundingBalanceStep);
+      lot = InpLots + steps * InpCompoundingLotIncrement;
+     }
+
+   lot = MathMax(InpLots, MathMin(InpMaxLots, lot));
+
+   double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double minVol  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maxVol  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+
+   if(lotStep > 0.0)
+      lot = MathRound(lot / lotStep) * lotStep;
+   lot = MathMax(minVol, MathMin(maxVol, lot));
+
+   return lot;
+  }
+
+//+------------------------------------------------------------------+
+//| Lot size already used by an existing basket, so averaging orders  |
+//| match the lot the basket was opened with instead of picking up a  |
+//| freshly-compounded size mid-basket. Returns 0 if the basket is    |
+//| empty (caller should fall back to ComputeLotSize()).              |
+//+------------------------------------------------------------------+
+double GetBasketLot(ENUM_TREND direction)
+  {
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket))
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol)
+         continue;
+      if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber)
+         continue;
+
+      ENUM_POSITION_TYPE ptype = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      if(direction == TREND_BUY  && ptype != POSITION_TYPE_BUY)  continue;
+      if(direction == TREND_SELL && ptype != POSITION_TYPE_SELL) continue;
+
+      return PositionGetDouble(POSITION_VOLUME);
+     }
+   return 0.0;
+  }
+
+//+------------------------------------------------------------------+
 //| Sum of floating profit (+ swap) for one basket (this symbol/magic |
 //| direction). Negative means the basket is underwater.              |
 //+------------------------------------------------------------------+
@@ -531,13 +593,13 @@ void CheckBasketTakeProfit()
   }
 
 //+------------------------------------------------------------------+
-void OpenMarket(ENUM_TREND direction, string comment)
+void OpenMarket(ENUM_TREND direction, double lot, string comment)
   {
    if(direction == TREND_BUY)
-      trade.Buy(InpLots, _Symbol, 0.0, 0.0, 0.0, comment);
+      trade.Buy(lot, _Symbol, 0.0, 0.0, 0.0, comment);
    else
       if(direction == TREND_SELL)
-         trade.Sell(InpLots, _Symbol, 0.0, 0.0, 0.0, comment);
+         trade.Sell(lot, _Symbol, 0.0, 0.0, 0.0, comment);
   }
 
 //+------------------------------------------------------------------+
@@ -545,7 +607,8 @@ void OpenMarket(ENUM_TREND direction, string comment)
 //| existing basket, up to InpMaxAveragingOrders positions total.    |
 //| Only averages while the H1 trend still agrees with the basket's  |
 //| direction, so a trend flip stops the basket from growing further |
-//| against the new H1 bias.                                         |
+//| against the new H1 bias. Uses the basket's own existing lot size |
+//| (GetBasketLot) rather than recomputing compounding mid-basket.   |
 //+------------------------------------------------------------------+
 void ManageAveraging(ENUM_TREND h1Trend)
   {
@@ -557,7 +620,11 @@ void ManageAveraging(ENUM_TREND h1Trend)
      {
       double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
       if(ask <= extremePrice - distance)
-         OpenMarket(TREND_BUY, "ADX-Scalper avg buy");
+        {
+         double lot = GetBasketLot(TREND_BUY);
+         if(lot <= 0.0) lot = ComputeLotSize();
+         OpenMarket(TREND_BUY, lot, "ADX-Scalper avg buy");
+        }
      }
 
    int sellCount = CountPositions(TREND_SELL, extremePrice);
@@ -565,7 +632,11 @@ void ManageAveraging(ENUM_TREND h1Trend)
      {
       double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
       if(bid >= extremePrice + distance)
-         OpenMarket(TREND_SELL, "ADX-Scalper avg sell");
+        {
+         double lot = GetBasketLot(TREND_SELL);
+         if(lot <= 0.0) lot = ComputeLotSize();
+         OpenMarket(TREND_SELL, lot, "ADX-Scalper avg sell");
+        }
      }
   }
 
@@ -576,7 +647,9 @@ void ManageAveraging(ENUM_TREND h1Trend)
 //| when H1 flips trend a fresh basket is opened on the new side      |
 //| while any existing basket on the other side is left untouched -  |
 //| it keeps averaging on its own once H1 swings back to agree with  |
-//| it (see ManageAveraging).                                        |
+//| it (see ManageAveraging). The lot for this new basket is fixed by |
+//| ComputeLotSize() at open time and reused for its future averaging |
+//| orders, so compounding can't drift a single basket's lot size.   |
 //+------------------------------------------------------------------+
 void CheckNewEntry(ENUM_TREND h1Trend)
   {
@@ -589,7 +662,7 @@ void CheckNewEntry(ENUM_TREND h1Trend)
 
    ENUM_TREND entryBias = GetEntryBias();
    if(entryBias == h1Trend)
-      OpenMarket(h1Trend, "ADX-Scalper entry");
+      OpenMarket(h1Trend, ComputeLotSize(), "ADX-Scalper entry");
   }
 
 //+------------------------------------------------------------------+

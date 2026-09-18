@@ -17,6 +17,7 @@ Expert Advisor for MetaTrader 5: `MQL5/Experts/ADX_Trend_Scalper_EA.mq5`
 7. **Daily profit target:** at the start of each new day (broker/server time), the account balance is recorded as that day's baseline. Once today's profit (current equity − that baseline) reaches `InpDailyTargetPercent` of the baseline (default 20%), the EA stops opening new entries and averaging orders for the rest of the day, and — if `InpCloseAllOnDailyTarget` is on (default) — immediately closes every open BUY/SELL basket to lock the gain in. It resumes normally at the next day rollover. This checks the whole account's equity/balance, not just this EA's own positions, so it only behaves as a pure "this EA's daily target" if nothing else trades the account.
 8. **Max floating loss (hard risk cap):** checked every tick, independently of the time filter and daily target. If one basket's own floating loss (sum of that basket's position profit + swap) reaches `InpMaxFloatingLossPercent` of the account balance (default 10%), that basket alone is force-closed — the other side is untouched. This is the only stop loss in the strategy; without it a basket can average all the way to `InpMaxAveragingOrders` with no exit on the loss side. Note: closing a basket this way doesn't block it from reopening — if the H1 trend and entry bias still agree right after the close, a fresh basket can start immediately on the same side.
 9. **Trailing stop (per position):** independent of the basket-level exits above, each individual position gets its own broker-side trailing stop. Once a position is more than `InpTrailingStopPoints` (default 300) in profit, its SL trails behind the current price at that same distance; the SL is only moved again once price has improved by at least `InpTrailingStepPoints` (default 200) since the last move. Since positions in a basket can have different open prices (from averaging), each one trails independently — a position can hit its trailing stop and close on its own before the whole basket reaches its take-profit target, which changes that basket's remaining average price.
+10. **Lot compounding (optional, off by default):** when `InpUseCompounding` is on, a brand-new basket's lot size scales with the account balance at the start of the day instead of always using `InpLots`. Every `InpCompoundingBalanceStep` of balance adds one `InpCompoundingLotIncrement` to the lot, floored at `InpLots` and capped at `InpMaxLots` — because it's computed from balance (not a locked-in high-water mark), the lot scales back down again during a drawdown, not just up during a winning streak. The lot is fixed for a basket at the moment it opens and every subsequent averaging order in that basket reuses that same lot (via the existing positions' own volume), so compounding never changes the lot size in the middle of an open basket.
 
 ## Key inputs
 
@@ -27,7 +28,11 @@ Expert Advisor for MetaTrader 5: `MQL5/Experts/ADX_Trend_Scalper_EA.mq5`
 | `InpMinWeakerDI` | 18.0 | Minimum level the weaker of DI+/DI- must also clear (looser than `InpADXTrendLevel`) |
 | `InpEntryTimeframe` | M15 | Entry timeframe: M1, M5, or M15 |
 | `InpADXPeriodEntry` | 14 | ADX period on the entry timeframe |
-| `InpLots` | 0.01 | Fixed lot size for every order (initial and averaging) |
+| `InpLots` | 0.01 | Base/minimum lot size (also the fixed lot when compounding is off) |
+| `InpUseCompounding` | false | Scale a new basket's lot with account balance instead of always using `InpLots` |
+| `InpCompoundingBalanceStep` | 100.0 | Balance increment that adds one `InpCompoundingLotIncrement` — must be tuned to your account size |
+| `InpCompoundingLotIncrement` | 0.01 | Lot added per `InpCompoundingBalanceStep` of balance |
+| `InpMaxLots` | 1.0 | Maximum lot size cap (applies with or without compounding) |
 | `InpAveragingMode` | ATR | `Fixed points` = constant distance; `ATR` = distance scales with H1 volatility |
 | `InpAveragingPoints` | 500 | Distance between averaging orders, in raw broker points (used only when mode = Fixed points) |
 | `InpATRPeriod` | 14 | ATR period on H1 (used only when mode = ATR) |
@@ -58,6 +63,15 @@ Expert Advisor for MetaTrader 5: `MQL5/Experts/ADX_Trend_Scalper_EA.mq5`
 Earlier versions measured averaging/take-profit distance in "pips", converted with the standard FX rule (1 pip = 10 points on 3/5-digit symbols). That rule silently breaks on non-forex symbols quoted with 2 decimals, like XAUUSD: `500 pips` was actually only `500 points = $5`, which gold can move through in minutes — baskets filled to the 10-order cap almost immediately with deep floating losses.
 
 The EA now works directly in **broker points** (`InpAveragingPoints`, `InpTakeProfitPoints`) with no pip conversion, plus an **ATR-based mode** (`InpAveragingMode = ATR`, the default) that sizes the averaging distance as `ATR(H1) × InpATRMultiplier` — this adapts automatically to each symbol's real volatility instead of relying on a fixed number that only made sense for one type of instrument. Check the "Averaging distance" line in the on-chart comment to see the live distance being used, and tune `InpATRMultiplier` (or switch to `Fixed points` with a value you've sized for the instrument) to taste.
+
+## About lot compounding
+
+Compounding is **off by default** because it multiplies risk with an already-multiplying grid: each basket can hold up to `InpMaxAveragingOrders` positions, and BUY/SELL can both be open at once, so a bigger base lot means a bigger position at every one of those levels, not just a bigger single trade. If you turn it on:
+
+- It's balance-based and symmetric — the lot goes back down as balance drops, not just up as it grows — specifically so a losing streak doesn't get stuck trading a large lot sized from a prior high balance.
+- `InpCompoundingBalanceStep` and `InpCompoundingLotIncrement` have no safe universal default; they must be sized to *your* account balance and risk tolerance (e.g. for a $1,000 account you probably want a much bigger step than the $100 default, or a much smaller increment).
+- Always set `InpMaxLots` to a value you're genuinely willing to hold up to `InpMaxAveragingOrders` times over, on both sides at once.
+- Consider tightening `InpMaxFloatingLossPercent` and/or lowering `InpMaxAveragingOrders` when compounding is on, since the nominal size of the worst case grows with the account.
 
 ## Risk note
 
