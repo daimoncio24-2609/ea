@@ -37,6 +37,21 @@ input int      InpMaxSpreadPoints      = 50;    // Max allowed spread (points)
 input int      InpMagicNumber          = 202609;// Magic number
 input int      InpSlippagePoints       = 10;    // Max deviation for orders (points)
 
+//--- Time filter
+input group "=== Time Filter (broker/server time) ==="
+input bool     InpUseTimeFilter        = true;  // Enable trading-hours filter
+input int      InpStartHour            = 0;     // Start hour (0-23)
+input int      InpStartMinute          = 0;     // Start minute (0-59)
+input int      InpEndHour              = 23;    // End hour (0-23)
+input int      InpEndMinute            = 59;    // End minute (0-59)
+input bool     InpTradeMonday          = true;
+input bool     InpTradeTuesday         = true;
+input bool     InpTradeWednesday       = true;
+input bool     InpTradeThursday        = true;
+input bool     InpTradeFriday          = true;
+input bool     InpTradeSaturday        = false;
+input bool     InpTradeSunday          = false;
+
 CTrade         trade;
 int            hADX_H1    = INVALID_HANDLE;
 int            hADX_Entry = INVALID_HANDLE;
@@ -92,6 +107,42 @@ bool SpreadOK()
   {
    long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
    return spread <= InpMaxSpreadPoints;
+  }
+
+//+------------------------------------------------------------------+
+//| Day-of-week + intraday time window filter (broker/server time)   |
+//+------------------------------------------------------------------+
+bool IsWithinTradingTime()
+  {
+   if(!InpUseTimeFilter)
+      return true;
+
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+
+   bool dayAllowed;
+   switch(dt.day_of_week)
+     {
+      case 0: dayAllowed = InpTradeSunday;    break;
+      case 1: dayAllowed = InpTradeMonday;    break;
+      case 2: dayAllowed = InpTradeTuesday;   break;
+      case 3: dayAllowed = InpTradeWednesday; break;
+      case 4: dayAllowed = InpTradeThursday;  break;
+      case 5: dayAllowed = InpTradeFriday;    break;
+      default: dayAllowed = InpTradeSaturday; break;
+     }
+   if(!dayAllowed)
+      return false;
+
+   int nowMinutes   = dt.hour * 60 + dt.min;
+   int startMinutes = InpStartHour * 60 + InpStartMinute;
+   int endMinutes   = InpEndHour * 60 + InpEndMinute;
+
+   if(startMinutes <= endMinutes)
+      return (nowMinutes >= startMinutes && nowMinutes <= endMinutes);
+
+   // window wraps past midnight (e.g. 22:00 -> 05:00)
+   return (nowMinutes >= startMinutes || nowMinutes <= endMinutes);
   }
 
 //+------------------------------------------------------------------+
@@ -328,7 +379,9 @@ void OnTick()
 
    CheckBasketTakeProfit();
 
-   if(SpreadOK())
+   bool timeOK = IsWithinTradingTime();
+
+   if(SpreadOK() && timeOK)
      {
       ManageAveraging(h1Trend);
       if(IsNewEntryBar())
@@ -337,8 +390,8 @@ void OnTick()
 
    string trendStr = (h1Trend == TREND_BUY) ? "BUY" : (h1Trend == TREND_SELL) ? "SELL" : "NONE";
    Comment(StringFormat(
-           "ADX Trend Scalper (magic %d)\nH1 trend: %s\nSpread: %d pts (max %d)\nOpen positions: %d",
+           "ADX Trend Scalper (magic %d)\nH1 trend: %s\nSpread: %d pts (max %d)\nTrading time: %s\nOpen positions: %d",
            InpMagicNumber, trendStr, (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD),
-           InpMaxSpreadPoints, TotalPositionsForSymbolMagic()));
+           InpMaxSpreadPoints, timeOK ? "OK" : "closed", TotalPositionsForSymbolMagic()));
   }
 //+------------------------------------------------------------------+
