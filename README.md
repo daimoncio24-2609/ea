@@ -14,6 +14,7 @@ Expert Advisor for MetaTrader 5: `MQL5/Experts/ADX_Trend_Scalper_EA.mq5`
 5. **Exit:** since the strategy has no per-order stop loss (by design — it averages into the position), each basket (BUY and SELL independently) is closed in full once price reaches that basket's volume-weighted average open price plus a take-profit distance in points (`InpTakeProfitPoints`, default 200). Without this, positions would never close.
 6. **Time filter:** new entries and averaging adds only happen inside an allowed day-of-week + intraday time window (broker/server time). On Fridays the window closes earlier (default 14:00) to reduce weekend-gap exposure, regardless of the general end time. Existing baskets can still be closed by the take-profit rule at any time, even outside the window.
 7. **Daily profit target:** at the start of each new day (broker/server time), the account balance is recorded as that day's baseline. Once today's profit (current equity − that baseline) reaches `InpDailyTargetPercent` of the baseline (default 20%), the EA stops opening new entries and averaging orders for the rest of the day, and — if `InpCloseAllOnDailyTarget` is on (default) — immediately closes every open BUY/SELL basket to lock the gain in. It resumes normally at the next day rollover. This checks the whole account's equity/balance, not just this EA's own positions, so it only behaves as a pure "this EA's daily target" if nothing else trades the account.
+8. **Max floating loss (hard risk cap):** checked every tick, independently of the time filter and daily target. If one basket's own floating loss (sum of that basket's position profit + swap) reaches `InpMaxFloatingLossPercent` of the account balance (default 10%), that basket alone is force-closed — the other side is untouched. This is the only stop loss in the strategy; without it a basket can average all the way to `InpMaxAveragingOrders` with no exit on the loss side. Note: closing a basket this way doesn't block it from reopening — if the H1 trend and entry bias still agree right after the close, a fresh basket can start immediately on the same side.
 
 ## Key inputs
 
@@ -43,6 +44,8 @@ Expert Advisor for MetaTrader 5: `MQL5/Experts/ADX_Trend_Scalper_EA.mq5`
 | `InpUseDailyTarget` | true | Stop opening new trades once today's profit target is hit |
 | `InpDailyTargetPercent` | 20.0 | Daily profit target, as % of the account balance at the start of the day |
 | `InpCloseAllOnDailyTarget` | true | Also close every open position (both baskets) once the daily target is hit, instead of just pausing new entries |
+| `InpUseMaxFloatingLoss` | true | Force-close a basket once its own floating loss gets too big |
+| `InpMaxFloatingLossPercent` | 10.0 | Max floating loss per basket, as % of account balance |
 
 ## Why points/ATR instead of "pips"
 
@@ -52,4 +55,4 @@ The EA now works directly in **broker points** (`InpAveragingPoints`, `InpTakePr
 
 ## Risk note
 
-This is a martingale-style averaging strategy: with `InpMaxAveragingOrders = 10`, a single basket can accumulate significant exposure before it stops adding orders. There is no hard basket stop loss — size `InpLots`, the averaging distance, and account balance accordingly. Because BUY and SELL baskets are independent, both sides can be open (hedged) at once on trend flips, so worst-case exposure/margin usage is up to double a single basket's.
+This is a martingale-style averaging strategy: with `InpMaxAveragingOrders = 10`, a single basket can accumulate significant exposure before it stops adding orders. `InpMaxFloatingLossPercent` (default 10% of balance per basket) is the hard stop that caps how deep that loss can go — size `InpLots`, the averaging distance, and this percentage together for your account balance. Because BUY and SELL baskets are independent, both sides can be open (hedged) at once on trend flips, so worst-case combined floating loss across both baskets is up to double the per-basket limit (roughly 20% of balance with the defaults) before both would be stopped out.

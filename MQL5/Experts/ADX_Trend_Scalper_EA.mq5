@@ -69,6 +69,11 @@ input bool     InpUseDailyTarget       = true;  // Stop trading once the daily t
 input double   InpDailyTargetPercent   = 20.0;  // Daily profit target, % of account balance at day start
 input bool     InpCloseAllOnDailyTarget = true; // Close all open positions once the target is hit
 
+//--- Risk control
+input group "=== Risk Control ==="
+input bool     InpUseMaxFloatingLoss    = true;  // Force-close a basket if its floating loss gets too big
+input double   InpMaxFloatingLossPercent = 10.0; // Max floating loss per basket, % of account balance
+
 CTrade         trade;
 int            hADX_H1    = INVALID_HANDLE;
 int            hADX_Entry = INVALID_HANDLE;
@@ -310,6 +315,32 @@ double AveragePrice(ENUM_TREND direction, double &totalVolume)
   }
 
 //+------------------------------------------------------------------+
+//| Sum of floating profit (+ swap) for one basket (this symbol/magic |
+//| direction). Negative means the basket is underwater.              |
+//+------------------------------------------------------------------+
+double BasketFloatingProfit(ENUM_TREND direction)
+  {
+   double sum = 0.0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket))
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol)
+         continue;
+      if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber)
+         continue;
+
+      ENUM_POSITION_TYPE ptype = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      if(direction == TREND_BUY  && ptype != POSITION_TYPE_BUY)  continue;
+      if(direction == TREND_SELL && ptype != POSITION_TYPE_SELL) continue;
+
+      sum += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+     }
+   return sum;
+  }
+
+//+------------------------------------------------------------------+
 void CloseDirection(ENUM_TREND direction)
   {
    for(int i = PositionsTotal() - 1; i >= 0; i--)
@@ -327,6 +358,41 @@ void CloseDirection(ENUM_TREND direction)
       if(direction == TREND_SELL && ptype != POSITION_TYPE_SELL) continue;
 
       trade.PositionClose(ticket);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Hard risk cap: since averaging has no per-order stop loss, force- |
+//| close a whole basket if its own floating loss reaches             |
+//| InpMaxFloatingLossPercent of the account balance. Checked          |
+//| independently per side (BUY/SELL), every tick, regardless of the  |
+//| time filter or daily target state.                                 |
+//+------------------------------------------------------------------+
+void CheckMaxFloatingLoss()
+  {
+   if(!InpUseMaxFloatingLoss)
+      return;
+
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   if(balance <= 0.0)
+      return;
+
+   double maxLoss = balance * InpMaxFloatingLossPercent / 100.0;
+
+   double buyProfit = BasketFloatingProfit(TREND_BUY);
+   if(buyProfit < 0.0 && -buyProfit >= maxLoss)
+     {
+      PrintFormat("Max floating loss hit on BUY basket: %.2f (limit -%.2f = %.1f%% of balance %.2f). Closing basket.",
+                  buyProfit, maxLoss, InpMaxFloatingLossPercent, balance);
+      CloseDirection(TREND_BUY);
+     }
+
+   double sellProfit = BasketFloatingProfit(TREND_SELL);
+   if(sellProfit < 0.0 && -sellProfit >= maxLoss)
+     {
+      PrintFormat("Max floating loss hit on SELL basket: %.2f (limit -%.2f = %.1f%% of balance %.2f). Closing basket.",
+                  sellProfit, maxLoss, InpMaxFloatingLossPercent, balance);
+      CloseDirection(TREND_SELL);
      }
   }
 
@@ -473,6 +539,7 @@ void OnTick()
    ENUM_TREND h1Trend = GetH1Trend();
 
    CheckBasketTakeProfit();
+   CheckMaxFloatingLoss();
    CheckDailyTarget();
 
    bool timeOK = IsWithinTradingTime();
@@ -486,14 +553,19 @@ void OnTick()
 
    double dailyProfit  = AccountInfoDouble(ACCOUNT_EQUITY) - g_dayStartBalance;
    double dailyPercent = (g_dayStartBalance > 0.0) ? dailyProfit / g_dayStartBalance * 100.0 : 0.0;
+   double balance      = AccountInfoDouble(ACCOUNT_BALANCE);
+   double buyFloating  = BasketFloatingProfit(TREND_BUY);
+   double sellFloating = BasketFloatingProfit(TREND_SELL);
+   double maxLoss      = balance * InpMaxFloatingLossPercent / 100.0;
 
    string trendStr = (h1Trend == TREND_BUY) ? "BUY" : (h1Trend == TREND_SELL) ? "SELL" : "NONE";
    Comment(StringFormat(
-           "ADX Trend Scalper (magic %d)\nH1 trend: %s\nSpread: %d pts (max %d)\nTrading time: %s\nAveraging distance: %.0f pts\nDaily P/L: %.2f (%.1f%% / target %.1f%%)%s\nOpen positions: %d",
+           "ADX Trend Scalper (magic %d)\nH1 trend: %s\nSpread: %d pts (max %d)\nTrading time: %s\nAveraging distance: %.0f pts\nDaily P/L: %.2f (%.1f%% / target %.1f%%)%s\nBUY basket: %.2f | SELL basket: %.2f (max loss -%.2f)\nOpen positions: %d",
            InpMagicNumber, trendStr, (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD),
            InpMaxSpreadPoints, timeOK ? "OK" : "closed", AveragingDistance() / _Point,
            dailyProfit, dailyPercent, InpDailyTargetPercent,
            g_dailyTargetHit ? " [TARGET HIT]" : "",
+           buyFloating, sellFloating, maxLoss,
            TotalPositionsForSymbolMagic()));
   }
 //+------------------------------------------------------------------+
