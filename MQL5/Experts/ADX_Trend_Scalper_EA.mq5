@@ -75,6 +75,12 @@ input group "=== Risk Control ==="
 input bool     InpUseMaxFloatingLoss    = true;  // Force-close a basket if its floating loss gets too big
 input double   InpMaxFloatingLossPercent = 10.0; // Max floating loss per basket, % of account balance
 
+//--- Trailing stop (per position, broker-side SL)
+input group "=== Trailing Stop ==="
+input bool     InpUseTrailingStop       = true;  // Enable per-position trailing stop
+input int      InpTrailingStopPoints    = 300;   // Trailing distance behind price, points
+input int      InpTrailingStepPoints    = 200;   // Min. improvement before the SL is moved again, points
+
 CTrade         trade;
 int            hADX_H1    = INVALID_HANDLE;
 int            hADX_Entry = INVALID_HANDLE;
@@ -401,6 +407,58 @@ void CheckMaxFloatingLoss()
   }
 
 //+------------------------------------------------------------------+
+//| Per-position trailing stop (broker-side SL). Once a position is   |
+//| more than InpTrailingStopPoints in profit, its SL trails behind   |
+//| price at that same distance, only moving again once the           |
+//| improvement reaches InpTrailingStepPoints. This works alongside,  |
+//| not instead of, the basket-level take-profit/max-loss checks:     |
+//| whichever condition is met first closes the position(s).          |
+//+------------------------------------------------------------------+
+void ApplyTrailingStop()
+  {
+   if(!InpUseTrailingStop)
+      return;
+
+   double stopDistance = InpTrailingStopPoints * _Point;
+   double stepDistance  = InpTrailingStepPoints * _Point;
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket))
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol)
+         continue;
+      if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber)
+         continue;
+
+      ENUM_POSITION_TYPE ptype    = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      double             openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      double             currentSL = PositionGetDouble(POSITION_SL);
+      double             tp        = PositionGetDouble(POSITION_TP);
+
+      if(ptype == POSITION_TYPE_BUY)
+        {
+         if(bid - openPrice <= stopDistance)
+            continue;
+         double newSL = bid - stopDistance;
+         if(currentSL == 0.0 || newSL - currentSL >= stepDistance)
+            trade.PositionModify(ticket, newSL, tp);
+        }
+      else if(ptype == POSITION_TYPE_SELL)
+        {
+         if(openPrice - ask <= stopDistance)
+            continue;
+         double newSL = ask + stopDistance;
+         if(currentSL == 0.0 || currentSL - newSL >= stepDistance)
+            trade.PositionModify(ticket, newSL, tp);
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
 //| Roll over the daily profit target at the start of each new day    |
 //| (broker/server time), using the account balance at that moment   |
 //| as the day's baseline.                                            |
@@ -544,6 +602,7 @@ void OnTick()
 
    CheckBasketTakeProfit();
    CheckMaxFloatingLoss();
+   ApplyTrailingStop();
    CheckDailyTarget();
 
    bool timeOK = IsWithinTradingTime();

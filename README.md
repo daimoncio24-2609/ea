@@ -16,6 +16,7 @@ Expert Advisor for MetaTrader 5: `MQL5/Experts/ADX_Trend_Scalper_EA.mq5`
 6. **Time filter:** new entries and averaging adds only happen inside an allowed day-of-week + intraday time window (broker/server time). On Fridays the window closes earlier (default 14:00) to reduce weekend-gap exposure, regardless of the general end time. Existing baskets can still be closed by the take-profit rule at any time, even outside the window.
 7. **Daily profit target:** at the start of each new day (broker/server time), the account balance is recorded as that day's baseline. Once today's profit (current equity − that baseline) reaches `InpDailyTargetPercent` of the baseline (default 20%), the EA stops opening new entries and averaging orders for the rest of the day, and — if `InpCloseAllOnDailyTarget` is on (default) — immediately closes every open BUY/SELL basket to lock the gain in. It resumes normally at the next day rollover. This checks the whole account's equity/balance, not just this EA's own positions, so it only behaves as a pure "this EA's daily target" if nothing else trades the account.
 8. **Max floating loss (hard risk cap):** checked every tick, independently of the time filter and daily target. If one basket's own floating loss (sum of that basket's position profit + swap) reaches `InpMaxFloatingLossPercent` of the account balance (default 10%), that basket alone is force-closed — the other side is untouched. This is the only stop loss in the strategy; without it a basket can average all the way to `InpMaxAveragingOrders` with no exit on the loss side. Note: closing a basket this way doesn't block it from reopening — if the H1 trend and entry bias still agree right after the close, a fresh basket can start immediately on the same side.
+9. **Trailing stop (per position):** independent of the basket-level exits above, each individual position gets its own broker-side trailing stop. Once a position is more than `InpTrailingStopPoints` (default 300) in profit, its SL trails behind the current price at that same distance; the SL is only moved again once price has improved by at least `InpTrailingStepPoints` (default 200) since the last move. Since positions in a basket can have different open prices (from averaging), each one trails independently — a position can hit its trailing stop and close on its own before the whole basket reaches its take-profit target, which changes that basket's remaining average price.
 
 ## Key inputs
 
@@ -48,6 +49,9 @@ Expert Advisor for MetaTrader 5: `MQL5/Experts/ADX_Trend_Scalper_EA.mq5`
 | `InpCloseAllOnDailyTarget` | true | Also close every open position (both baskets) once the daily target is hit, instead of just pausing new entries |
 | `InpUseMaxFloatingLoss` | true | Force-close a basket once its own floating loss gets too big |
 | `InpMaxFloatingLossPercent` | 10.0 | Max floating loss per basket, as % of account balance |
+| `InpUseTrailingStop` | true | Enable the per-position trailing stop |
+| `InpTrailingStopPoints` | 300 | Trailing distance behind price, in points, once a position is that far in profit |
+| `InpTrailingStepPoints` | 200 | Minimum additional profit (points) before the trailing SL is moved again |
 
 ## Why points/ATR instead of "pips"
 
