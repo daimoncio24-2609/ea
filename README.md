@@ -13,6 +13,7 @@ Expert Advisor for MetaTrader 5: `MQL5/Experts/ADX_Trend_Scalper_EA.mq5`
 4. **Averaging (grid):** once a basket is open, an extra order in the same direction is added every *averaging distance* of adverse movement (measured from the worst-priced order in that basket), up to `10` open positions per basket (`InpMaxAveragingOrders` applies per side, so BUY and SELL can each hold up to that many). Averaging only continues while the **current** H1 trend still agrees with the basket's direction. The distance is **not** a hardcoded "pip" — see the note below on `InpAveragingMode`.
 5. **Exit:** since the strategy has no per-order stop loss (by design — it averages into the position), each basket (BUY and SELL independently) is closed in full once price reaches that basket's volume-weighted average open price plus a take-profit distance in points (`InpTakeProfitPoints`, default 200). Without this, positions would never close.
 6. **Time filter:** new entries and averaging adds only happen inside an allowed day-of-week + intraday time window (broker/server time). On Fridays the window closes earlier (default 14:00) to reduce weekend-gap exposure, regardless of the general end time. Existing baskets can still be closed by the take-profit rule at any time, even outside the window.
+7. **Daily profit target:** at the start of each new day (broker/server time), the account balance is recorded as that day's baseline. Once today's profit (current equity − that baseline) reaches `InpDailyTargetPercent` of the baseline (default 20%), the EA stops opening new entries and averaging orders for the rest of the day, and — if `InpCloseAllOnDailyTarget` is on (default) — immediately closes every open BUY/SELL basket to lock the gain in. It resumes normally at the next day rollover. This checks the whole account's equity/balance, not just this EA's own positions, so it only behaves as a pure "this EA's daily target" if nothing else trades the account.
 
 ## Key inputs
 
@@ -39,6 +40,9 @@ Expert Advisor for MetaTrader 5: `MQL5/Experts/ADX_Trend_Scalper_EA.mq5`
 | `InpTradeSaturday` / `InpTradeSunday` | false | Allow trading on that weekend day |
 | `InpUseFridayEarlyClose` | true | On Friday, use `InpFridayEndHour`/`InpFridayEndMinute` instead of `InpEndHour`/`InpEndMinute` as the cutoff for new entries |
 | `InpFridayEndHour` / `InpFridayEndMinute` | 14 / 0 | Friday-only cutoff time for new entries/averaging (broker/server time) |
+| `InpUseDailyTarget` | true | Stop opening new trades once today's profit target is hit |
+| `InpDailyTargetPercent` | 20.0 | Daily profit target, as % of the account balance at the start of the day |
+| `InpCloseAllOnDailyTarget` | true | Also close every open position (both baskets) once the daily target is hit, instead of just pausing new entries |
 
 ## Why points/ATR instead of "pips"
 

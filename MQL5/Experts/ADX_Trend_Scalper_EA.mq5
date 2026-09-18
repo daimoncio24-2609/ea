@@ -63,11 +63,20 @@ input bool     InpUseFridayEarlyClose  = true;  // On Friday, stop new entries e
 input int      InpFridayEndHour        = 14;    // Friday cutoff hour (0-23)
 input int      InpFridayEndMinute      = 0;     // Friday cutoff minute (0-59)
 
+//--- Daily profit target
+input group "=== Daily Target ==="
+input bool     InpUseDailyTarget       = true;  // Stop trading once the daily target is hit
+input double   InpDailyTargetPercent   = 20.0;  // Daily profit target, % of account balance at day start
+input bool     InpCloseAllOnDailyTarget = true; // Close all open positions once the target is hit
+
 CTrade         trade;
 int            hADX_H1    = INVALID_HANDLE;
 int            hADX_Entry = INVALID_HANDLE;
 int            hATR_H1    = INVALID_HANDLE;
 datetime       g_lastEntryBarTime = 0;
+datetime       g_currentDayStart  = 0;
+double         g_dayStartBalance  = 0.0;
+bool           g_dailyTargetHit   = false;
 
 enum ENUM_TREND
   {
@@ -320,6 +329,56 @@ void CloseDirection(ENUM_TREND direction)
   }
 
 //+------------------------------------------------------------------+
+//| Roll over the daily profit target at the start of each new day    |
+//| (broker/server time), using the account balance at that moment   |
+//| as the day's baseline.                                            |
+//+------------------------------------------------------------------+
+void RolloverDailyTarget()
+  {
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   dt.hour = 0; dt.min = 0; dt.sec = 0;
+   datetime dayStart = StructToTime(dt);
+
+   if(dayStart != g_currentDayStart)
+     {
+      g_currentDayStart = dayStart;
+      g_dayStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+      g_dailyTargetHit  = false;
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Once today's profit (equity - balance at day start) reaches       |
+//| InpDailyTargetPercent of that starting balance, stop opening new  |
+//| trades for the rest of the day and optionally flatten everything  |
+//| to lock the gain in. Note: this looks at the whole account's      |
+//| equity/balance, not just this EA's positions.                     |
+//+------------------------------------------------------------------+
+void CheckDailyTarget()
+  {
+   RolloverDailyTarget();
+
+   if(!InpUseDailyTarget || g_dailyTargetHit || g_dayStartBalance <= 0.0)
+      return;
+
+   double profit       = AccountInfoDouble(ACCOUNT_EQUITY) - g_dayStartBalance;
+   double targetProfit = g_dayStartBalance * InpDailyTargetPercent / 100.0;
+
+   if(profit >= targetProfit)
+     {
+      g_dailyTargetHit = true;
+      PrintFormat("Daily target reached: profit %.2f >= target %.2f (%.1f%% of %.2f). Trading paused for today.",
+                  profit, targetProfit, InpDailyTargetPercent, g_dayStartBalance);
+      if(InpCloseAllOnDailyTarget)
+        {
+         CloseDirection(TREND_BUY);
+         CloseDirection(TREND_SELL);
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
 //| Close a basket once price reaches TP distance from its average   |
 //| open price (lets a losing average recover instead of never       |
 //| closing at all)                                                  |
@@ -412,21 +471,27 @@ void OnTick()
    ENUM_TREND h1Trend = GetH1Trend();
 
    CheckBasketTakeProfit();
+   CheckDailyTarget();
 
    bool timeOK = IsWithinTradingTime();
 
-   if(SpreadOK() && timeOK)
+   if(SpreadOK() && timeOK && !g_dailyTargetHit)
      {
       ManageAveraging(h1Trend);
       if(IsNewEntryBar())
          CheckNewEntry(h1Trend);
      }
 
+   double dailyProfit  = AccountInfoDouble(ACCOUNT_EQUITY) - g_dayStartBalance;
+   double dailyPercent = (g_dayStartBalance > 0.0) ? dailyProfit / g_dayStartBalance * 100.0 : 0.0;
+
    string trendStr = (h1Trend == TREND_BUY) ? "BUY" : (h1Trend == TREND_SELL) ? "SELL" : "NONE";
    Comment(StringFormat(
-           "ADX Trend Scalper (magic %d)\nH1 trend: %s\nSpread: %d pts (max %d)\nTrading time: %s\nAveraging distance: %.0f pts\nOpen positions: %d",
+           "ADX Trend Scalper (magic %d)\nH1 trend: %s\nSpread: %d pts (max %d)\nTrading time: %s\nAveraging distance: %.0f pts\nDaily P/L: %.2f (%.1f%% / target %.1f%%)%s\nOpen positions: %d",
            InpMagicNumber, trendStr, (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD),
            InpMaxSpreadPoints, timeOK ? "OK" : "closed", AveragingDistance() / _Point,
+           dailyProfit, dailyPercent, InpDailyTargetPercent,
+           g_dailyTargetHit ? " [TARGET HIT]" : "",
            TotalPositionsForSymbolMagic()));
   }
 //+------------------------------------------------------------------+
