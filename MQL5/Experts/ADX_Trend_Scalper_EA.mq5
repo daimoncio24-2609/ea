@@ -11,7 +11,8 @@
 //--- H1 trend filter (ADX)
 input group "=== Trend Filter (H1 ADX) ==="
 input int      InpADXPeriodH1        = 14;      // ADX period on H1
-input double   InpADXTrendLevel      = 25.0;    // Level that ADX AND the weaker DI must both clear to confirm a trend
+input double   InpADXTrendLevel      = 25.0;    // ADX level that confirms a trend
+input double   InpMinWeakerDI        = 18.0;    // Minimum level the weaker DI must also clear (looser than InpADXTrendLevel)
 
 //--- Entry timeframe
 input group "=== Entry Timeframe ==="
@@ -187,10 +188,13 @@ bool IsWithinTradingTime()
   }
 
 //+------------------------------------------------------------------+
-//| H1 trend: DI+ > DI- > level and ADX > level => BUY                |
-//|           DI- > DI+ > level and ADX > level => SELL                |
-//| (both DI+ and DI- must clear the level, not just ADX), otherwise  |
-//| no trend                                                           |
+//| H1 trend: DI+ > DI- > InpMinWeakerDI and ADX > InpADXTrendLevel   |
+//|           => BUY; DI- > DI+ > InpMinWeakerDI and ADX >            |
+//|           InpADXTrendLevel => SELL; otherwise no trend.           |
+//| InpMinWeakerDI is intentionally looser than InpADXTrendLevel:     |
+//| in a real trend, ADX rises precisely because the losing DI falls  |
+//| well below the ADX level, so requiring both DIs to clear the same |
+//| (higher) level almost never happens.                              |
 //+------------------------------------------------------------------+
 ENUM_TREND GetH1Trend()
   {
@@ -199,9 +203,9 @@ ENUM_TREND GetH1Trend()
    if(CopyBuffer(hADX_H1, PLUSDI_LINE, 1, 1, plusDI) <= 0)  return TREND_NONE;
    if(CopyBuffer(hADX_H1, MINUSDI_LINE, 1, 1, minusDI) <= 0) return TREND_NONE;
 
-   if(adx[0] > InpADXTrendLevel && plusDI[0] > minusDI[0] && minusDI[0] > InpADXTrendLevel)
+   if(adx[0] > InpADXTrendLevel && plusDI[0] > minusDI[0] && minusDI[0] > InpMinWeakerDI)
       return TREND_BUY;
-   if(adx[0] > InpADXTrendLevel && minusDI[0] > plusDI[0] && plusDI[0] > InpADXTrendLevel)
+   if(adx[0] > InpADXTrendLevel && minusDI[0] > plusDI[0] && plusDI[0] > InpMinWeakerDI)
       return TREND_SELL;
    return TREND_NONE;
   }
