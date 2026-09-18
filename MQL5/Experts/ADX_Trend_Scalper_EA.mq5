@@ -51,6 +51,9 @@ input bool     InpTradeThursday        = true;
 input bool     InpTradeFriday          = true;
 input bool     InpTradeSaturday        = false;
 input bool     InpTradeSunday          = false;
+input bool     InpUseFridayEarlyClose  = true;  // On Friday, stop new entries earlier
+input int      InpFridayEndHour        = 14;    // Friday cutoff hour (0-23)
+input int      InpFridayEndMinute      = 0;     // Friday cutoff minute (0-59)
 
 CTrade         trade;
 int            hADX_H1    = INVALID_HANDLE;
@@ -137,6 +140,10 @@ bool IsWithinTradingTime()
    int nowMinutes   = dt.hour * 60 + dt.min;
    int startMinutes = InpStartHour * 60 + InpStartMinute;
    int endMinutes   = InpEndHour * 60 + InpEndMinute;
+
+   // Friday gets its own (earlier) cutoff to reduce weekend-gap exposure
+   if(dt.day_of_week == 5 && InpUseFridayEarlyClose)
+      endMinutes = InpFridayEndHour * 60 + InpFridayEndMinute;
 
    if(startMinutes <= endMinutes)
       return (nowMinutes >= startMinutes && nowMinutes <= endMinutes);

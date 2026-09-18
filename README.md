@@ -12,7 +12,7 @@ Expert Advisor for MetaTrader 5: `MQL5/Experts/ADX_Trend_Scalper_EA.mq5`
 3. **Trend flip → new basket, old basket keeps waiting:** BUY and SELL each have their own basket. When H1 flips trend, a fresh basket is opened straight away on the new side (per point 2), while any basket still open on the other side is left as-is: it is **not** closed and does **not** get new averaging orders while H1 disagrees with it. If H1 later swings back to agree with that older basket, it resumes averaging (point 4) right where it left off. This means BUY and SELL baskets can be open on the same symbol at the same time (hedging), each managed independently.
 4. **Averaging (grid):** once a basket is open, an extra order in the same direction is added every `500` pips of adverse movement (measured from the worst-priced order in that basket), up to `10` open positions per basket (`InpMaxAveragingOrders` applies per side, so BUY and SELL can each hold up to that many). Averaging only continues while the **current** H1 trend still agrees with the basket's direction.
 5. **Exit:** since the strategy has no per-order stop loss (by design — it averages into the position), each basket (BUY and SELL independently) is closed in full once price reaches that basket's volume-weighted average open price plus a small take-profit distance (default 20 pips). Without this, positions would never close.
-6. **Time filter:** new entries and averaging adds only happen inside an allowed day-of-week + intraday time window (broker/server time). Existing baskets can still be closed by the take-profit rule at any time, even outside the window.
+6. **Time filter:** new entries and averaging adds only happen inside an allowed day-of-week + intraday time window (broker/server time). On Fridays the window closes earlier (default 14:00) to reduce weekend-gap exposure, regardless of the general end time. Existing baskets can still be closed by the take-profit rule at any time, even outside the window.
 
 ## Key inputs
 
@@ -34,6 +34,8 @@ Expert Advisor for MetaTrader 5: `MQL5/Experts/ADX_Trend_Scalper_EA.mq5`
 | `InpEndHour` / `InpEndMinute` | 23 / 59 | End of allowed trading window (broker/server time); if start > end, the window wraps past midnight |
 | `InpTradeMonday` … `InpTradeFriday` | true | Allow trading on that weekday |
 | `InpTradeSaturday` / `InpTradeSunday` | false | Allow trading on that weekend day |
+| `InpUseFridayEarlyClose` | true | On Friday, use `InpFridayEndHour`/`InpFridayEndMinute` instead of `InpEndHour`/`InpEndMinute` as the cutoff for new entries |
+| `InpFridayEndHour` / `InpFridayEndMinute` | 14 / 0 | Friday-only cutoff time for new entries/averaging (broker/server time) |
 
 ## Risk note
 
