@@ -41,7 +41,14 @@ input double   InpAveragingPoints      = 500.0; // Fixed distance between averag
 input int      InpATRPeriod            = 14;    // ATR period on H1 (used when mode = ATR)
 input double   InpATRMultiplier        = 3.0;   // Averaging distance = ATR(H1) * this (used when mode = ATR)
 input int      InpMaxAveragingOrders   = 10;    // Max open orders per basket (incl. first)
-input double   InpTakeProfitPoints     = 200.0; // Basket close target from average price, in points
+enum ENUM_TP_MODE
+  {
+   TP_MODE_FIXED_POINTS,  // Fixed distance in points
+   TP_MODE_ATR            // Distance = ATR(H1) * multiplier
+  };
+input ENUM_TP_MODE InpTakeProfitMode   = TP_MODE_FIXED_POINTS; // Basket take-profit distance mode
+input double   InpTakeProfitPoints     = 200.0; // Basket close target from average price, in points (used when mode = Fixed points)
+input double   InpTPATRMultiplier      = 2.0;   // Basket TP distance = ATR(H1) * this (used when mode = ATR)
 
 //--- Filters / identification
 input group "=== Filters ==="
@@ -66,6 +73,13 @@ input bool     InpTradeSunday          = false;
 input bool     InpUseFridayEarlyClose  = true;  // On Friday, stop new entries earlier
 input int      InpFridayEndHour        = 14;    // Friday cutoff hour (0-23)
 input int      InpFridayEndMinute      = 0;     // Friday cutoff minute (0-59)
+
+//--- News filter
+input group "=== News Filter ==="
+input bool     InpUseNewsFilter        = true;  // Pause new entries/averaging around high-impact news
+input int      InpNewsMinutesBefore    = 30;    // Minutes before a qualifying event to start the blackout
+input int      InpNewsMinutesAfter     = 30;    // Minutes after a qualifying event to end the blackout
+input ENUM_CALENDAR_EVENT_IMPORTANCE InpNewsMinImportance = CALENDAR_IMPORTANCE_HIGH; // Minimum event importance treated as "news"
 
 //--- Daily profit target
 input group "=== Daily Target ==="
@@ -150,6 +164,23 @@ double AveragingDistance()
   }
 
 //+------------------------------------------------------------------+
+//| Basket take-profit distance (in price units) from the average    |
+//| open price. Same rationale as AveragingDistance(): a fixed point  |
+//| value only really suits one type of instrument, so an ATR-based   |
+//| mode is offered to auto-scale with each symbol's real volatility. |
+//+------------------------------------------------------------------+
+double TakeProfitDistance()
+  {
+   if(InpTakeProfitMode == TP_MODE_ATR)
+     {
+      double atr[];
+      if(CopyBuffer(hATR_H1, 0, 1, 1, atr) > 0 && atr[0] > 0.0)
+         return atr[0] * InpTPATRMultiplier;
+     }
+   return InpTakeProfitPoints * _Point;
+  }
+
+//+------------------------------------------------------------------+
 bool SpreadOK()
   {
    long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
@@ -194,6 +225,62 @@ bool IsWithinTradingTime()
 
    // window wraps past midnight (e.g. 22:00 -> 05:00)
    return (nowMinutes >= startMinutes || nowMinutes <= endMinutes);
+  }
+
+//+------------------------------------------------------------------+
+//| True while "now" falls within InpNewsMinutesBefore/After of a     |
+//| qualifying calendar event for the symbol's base or profit         |
+//| currency. Uses the terminal's built-in Economic Calendar, so it   |
+//| needs the calendar to be available/synced (works in live/demo;    |
+//| in the Strategy Tester it depends on downloaded calendar history  |
+//| being available for the tested period). Result is cached for a   |
+//| minute since scanning the calendar every tick is unnecessary.     |
+//+------------------------------------------------------------------+
+bool IsNewsBlackout()
+  {
+   if(!InpUseNewsFilter)
+      return false;
+
+   static datetime lastCheck    = 0;
+   static bool     cachedResult = false;
+
+   datetime now = TimeCurrent();
+   if(lastCheck != 0 && now - lastCheck < 60)
+      return cachedResult;
+   lastCheck = now;
+
+   datetime queryFrom = now - InpNewsMinutesAfter  * 60;
+   datetime queryTo   = now + InpNewsMinutesBefore * 60;
+
+   string currencies[2];
+   currencies[0] = SymbolInfoString(_Symbol, SYMBOL_CURRENCY_BASE);
+   currencies[1] = SymbolInfoString(_Symbol, SYMBOL_CURRENCY_PROFIT);
+
+   bool blackout = false;
+   for(int c = 0; c < 2 && !blackout; c++)
+     {
+      if(currencies[c] == "" || (c == 1 && currencies[1] == currencies[0]))
+         continue;
+
+      MqlCalendarValue values[];
+      if(!CalendarValueHistory(values, queryFrom, queryTo, NULL, currencies[c]))
+         continue;
+
+      for(int i = 0; i < ArraySize(values); i++)
+        {
+         MqlCalendarEvent event;
+         if(!CalendarEventById(values[i].event_id, event))
+            continue;
+         if(event.importance >= InpNewsMinImportance)
+           {
+            blackout = true;
+            break;
+           }
+        }
+     }
+
+   cachedResult = blackout;
+   return blackout;
   }
 
 //+------------------------------------------------------------------+
@@ -571,7 +658,7 @@ void CheckDailyTarget()
 //+------------------------------------------------------------------+
 void CheckBasketTakeProfit()
   {
-   double tpDistance = InpTakeProfitPoints * _Point;
+   double tpDistance = TakeProfitDistance();
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
 
@@ -672,9 +759,10 @@ void OnTick()
    ApplyTrailingStop();
    CheckDailyTarget();
 
-   bool timeOK = IsWithinTradingTime();
+   bool timeOK  = IsWithinTradingTime();
+   bool newsOK  = !IsNewsBlackout();
 
-   if(SpreadOK() && timeOK && !g_dailyTargetHit)
+   if(SpreadOK() && timeOK && newsOK && !g_dailyTargetHit)
      {
       ManageAveraging(h1Trend);
       if(IsNewEntryBar())
@@ -690,9 +778,10 @@ void OnTick()
 
    string trendStr = (h1Trend == TREND_BUY) ? "BUY" : (h1Trend == TREND_SELL) ? "SELL" : "NONE";
    Comment(StringFormat(
-           "ADX Trend Scalper (magic %d)\nH1 trend: %s\nSpread: %d pts (max %d)\nTrading time: %s\nAveraging distance: %.0f pts\nDaily P/L: %.2f (%.1f%% / target %.1f%%)%s\nBUY basket: %.2f | SELL basket: %.2f (max loss -%.2f)\nOpen positions: %d",
+           "ADX Trend Scalper (magic %d)\nH1 trend: %s\nSpread: %d pts (max %d)\nTrading time: %s | News: %s\nAveraging distance: %.0f pts | TP distance: %.0f pts\nDaily P/L: %.2f (%.1f%% / target %.1f%%)%s\nBUY basket: %.2f | SELL basket: %.2f (max loss -%.2f)\nOpen positions: %d",
            InpMagicNumber, trendStr, (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD),
-           InpMaxSpreadPoints, timeOK ? "OK" : "closed", AveragingDistance() / _Point,
+           InpMaxSpreadPoints, timeOK ? "OK" : "closed", newsOK ? "OK" : "blackout",
+           AveragingDistance() / _Point, TakeProfitDistance() / _Point,
            dailyProfit, dailyPercent, InpDailyTargetPercent,
            g_dailyTargetHit ? " [TARGET HIT]" : "",
            buyFloating, sellFloating, maxLoss,
