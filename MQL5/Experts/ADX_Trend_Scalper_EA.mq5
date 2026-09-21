@@ -23,6 +23,7 @@ enum ENUM_ENTRY_TF
   };
 input ENUM_ENTRY_TF InpEntryTimeframe = ENTRY_TF_M15; // Entry timeframe (M1/M5/M15)
 input int      InpADXPeriodEntry     = 14;      // ADX period on entry timeframe
+input double   InpADXMinLevelEntry   = 20.0;    // Min. ADX on the entry timeframe to accept a signal (filters choppy/no-momentum bars)
 
 //--- Money management / averaging
 input group "=== Lot & Averaging ==="
@@ -302,16 +303,38 @@ ENUM_TREND GetH1Trend()
   }
 
 //+------------------------------------------------------------------+
-//| Directional bias on the entry timeframe (DI+ vs DI-)             |
+//| Directional bias on the entry timeframe. Two extra conditions on |
+//| top of the plain DI+/DI- comparison, both aimed at cutting down   |
+//| false/whipsaw entries on the (usually noisier) lower timeframe:   |
+//| 1) ADX on the entry TF must clear InpADXMinLevelEntry - a bare DI |
+//|    cross during a flat/choppy stretch is rejected.                |
+//| 2) The cross must be fresh: the DI relationship on the previous  |
+//|    closed bar must NOT already have matched, so this only fires  |
+//|    right as the cross happens instead of every bar afterwards    |
+//|    while it happens to still hold (which is often a late entry). |
 //+------------------------------------------------------------------+
 ENUM_TREND GetEntryBias()
   {
-   double plusDI[], minusDI[];
-   if(CopyBuffer(hADX_Entry, PLUSDI_LINE, 1, 1, plusDI) <= 0)  return TREND_NONE;
-   if(CopyBuffer(hADX_Entry, MINUSDI_LINE, 1, 1, minusDI) <= 0) return TREND_NONE;
+   double adx[], plusDI[], minusDI[];
+   if(CopyBuffer(hADX_Entry, MAIN_LINE, 1, 1, adx) <= 0)
+      return TREND_NONE;
+   if(CopyBuffer(hADX_Entry, PLUSDI_LINE, 1, 2, plusDI) < 2)
+      return TREND_NONE;
+   if(CopyBuffer(hADX_Entry, MINUSDI_LINE, 1, 2, minusDI) < 2)
+      return TREND_NONE;
 
-   if(plusDI[0] > minusDI[0]) return TREND_BUY;
-   if(minusDI[0] > plusDI[0]) return TREND_SELL;
+   if(adx[0] < InpADXMinLevelEntry)
+      return TREND_NONE;
+
+   bool buyNow  = plusDI[0]  > minusDI[0];
+   bool buyPrev = plusDI[1]  > minusDI[1];
+   bool sellNow = minusDI[0] > plusDI[0];
+   bool sellPrev = minusDI[1] > plusDI[1];
+
+   if(buyNow && !buyPrev)
+      return TREND_BUY;
+   if(sellNow && !sellPrev)
+      return TREND_SELL;
    return TREND_NONE;
   }
 
