@@ -12,6 +12,7 @@
 input group "=== Trend Filter (H1 ADX) ==="
 input int      InpADXPeriodH1        = 14;      // ADX period on H1
 input double   InpADXTrendLevel      = 25.0;    // ADX level that confirms a trend
+input double   InpMinDISpreadH1      = 5.0;     // Min. DI+/DI- separation on H1 to accept a trend (rejects a razor-thin DI cross)
 
 //--- Entry timeframe
 input group "=== Entry Timeframe ==="
@@ -24,6 +25,7 @@ enum ENUM_ENTRY_TF
 input ENUM_ENTRY_TF InpEntryTimeframe = ENTRY_TF_M15; // Entry timeframe (M1/M5/M15)
 input int      InpADXPeriodEntry     = 14;      // ADX period on entry timeframe
 input double   InpADXMinLevelEntry   = 20.0;    // Min. ADX on the entry timeframe to accept a signal (filters choppy/no-momentum bars)
+input double   InpMinDISpreadEntry   = 5.0;     // Min. DI+/DI- separation on the entry timeframe to accept a signal
 
 //--- Money management / averaging
 input group "=== Lot & Averaging ==="
@@ -286,7 +288,9 @@ bool IsNewsBlackout()
 
 //+------------------------------------------------------------------+
 //| H1 trend: DI+ > DI- and ADX > level => BUY, DI- > DI+ and        |
-//| ADX > level => SELL, otherwise no trend                          |
+//| ADX > level => SELL, otherwise no trend. Also requires the DI+/  |
+//| DI- gap to clear InpMinDISpreadH1, so a razor-thin cross (won by  |
+//| a fraction of a point) doesn't count as a real trend.            |
 //+------------------------------------------------------------------+
 ENUM_TREND GetH1Trend()
   {
@@ -295,23 +299,25 @@ ENUM_TREND GetH1Trend()
    if(CopyBuffer(hADX_H1, PLUSDI_LINE, 1, 1, plusDI) <= 0)  return TREND_NONE;
    if(CopyBuffer(hADX_H1, MINUSDI_LINE, 1, 1, minusDI) <= 0) return TREND_NONE;
 
-   if(adx[0] > InpADXTrendLevel && plusDI[0] > minusDI[0])
+   if(adx[0] > InpADXTrendLevel && plusDI[0] - minusDI[0] >= InpMinDISpreadH1)
       return TREND_BUY;
-   if(adx[0] > InpADXTrendLevel && minusDI[0] > plusDI[0])
+   if(adx[0] > InpADXTrendLevel && minusDI[0] - plusDI[0] >= InpMinDISpreadH1)
       return TREND_SELL;
    return TREND_NONE;
   }
 
 //+------------------------------------------------------------------+
-//| Directional bias on the entry timeframe. Two extra conditions on |
-//| top of the plain DI+/DI- comparison, both aimed at cutting down   |
+//| Directional bias on the entry timeframe. Three extra conditions  |
+//| on top of the plain DI+/DI- comparison, all aimed at cutting down |
 //| false/whipsaw entries on the (usually noisier) lower timeframe:   |
 //| 1) ADX on the entry TF must clear InpADXMinLevelEntry - a bare DI |
 //|    cross during a flat/choppy stretch is rejected.                |
-//| 2) The cross must be fresh: the DI relationship on the previous  |
-//|    closed bar must NOT already have matched, so this only fires  |
-//|    right as the cross happens instead of every bar afterwards    |
-//|    while it happens to still hold (which is often a late entry). |
+//| 2) The DI+/DI- gap must clear InpMinDISpreadEntry - a razor-thin  |
+//|    cross (won by a fraction of a point) doesn't count.            |
+//| 3) The (qualifying) cross must be fresh: the previous closed bar  |
+//|    must NOT already have qualified, so this only fires right as   |
+//|    the cross happens instead of every bar afterwards while it     |
+//|    happens to still hold (which is often a late entry).           |
 //+------------------------------------------------------------------+
 ENUM_TREND GetEntryBias()
   {
@@ -326,10 +332,10 @@ ENUM_TREND GetEntryBias()
    if(adx[0] < InpADXMinLevelEntry)
       return TREND_NONE;
 
-   bool buyNow  = plusDI[0]  > minusDI[0];
-   bool buyPrev = plusDI[1]  > minusDI[1];
-   bool sellNow = minusDI[0] > plusDI[0];
-   bool sellPrev = minusDI[1] > plusDI[1];
+   bool buyNow   = (plusDI[0]  - minusDI[0]) >= InpMinDISpreadEntry;
+   bool buyPrev  = (plusDI[1]  - minusDI[1]) >= InpMinDISpreadEntry;
+   bool sellNow  = (minusDI[0] - plusDI[0])  >= InpMinDISpreadEntry;
+   bool sellPrev = (minusDI[1] - plusDI[1])  >= InpMinDISpreadEntry;
 
    if(buyNow && !buyPrev)
       return TREND_BUY;
