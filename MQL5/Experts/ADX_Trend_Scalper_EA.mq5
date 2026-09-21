@@ -41,15 +41,15 @@ input ENUM_AVG_MODE InpAveragingMode    = AVG_MODE_ATR; // Averaging distance mo
 input double   InpAveragingPoints      = 500.0; // Fixed distance between averaging orders, in points (used when mode = Fixed points)
 input int      InpATRPeriod            = 14;    // ATR period on H1 (used when mode = ATR)
 input double   InpATRMultiplier        = 3.0;   // Averaging distance = ATR(H1) * this (used when mode = ATR)
-input int      InpMaxAveragingOrders   = 10;    // Max open orders per basket (incl. first)
+input int      InpMaxAveragingOrders   = 5;     // Max open orders per basket (incl. first)
 enum ENUM_TP_MODE
   {
    TP_MODE_FIXED_POINTS,  // Fixed distance in points
    TP_MODE_ATR            // Distance = ATR(H1) * multiplier
   };
-input ENUM_TP_MODE InpTakeProfitMode   = TP_MODE_FIXED_POINTS; // Basket take-profit distance mode
+input ENUM_TP_MODE InpTakeProfitMode   = TP_MODE_ATR; // Basket take-profit distance mode
 input double   InpTakeProfitPoints     = 200.0; // Basket close target from average price, in points (used when mode = Fixed points)
-input double   InpTPATRMultiplier      = 2.0;   // Basket TP distance = ATR(H1) * this (used when mode = ATR)
+input double   InpTPATRMultiplier      = 1.5;   // Basket TP distance = ATR(H1) * this (used when mode = ATR)
 
 //--- Filters / identification
 input group "=== Filters ==="
@@ -60,10 +60,10 @@ input int      InpSlippagePoints       = 10;    // Max deviation for orders (poi
 //--- Time filter
 input group "=== Time Filter (broker/server time) ==="
 input bool     InpUseTimeFilter        = true;  // Enable trading-hours filter
-input int      InpStartHour            = 0;     // Start hour (0-23)
+input int      InpStartHour            = 8;     // Start hour (0-23) -- default targets the London/NY session overlap
 input int      InpStartMinute          = 0;     // Start minute (0-59)
-input int      InpEndHour              = 23;    // End hour (0-23)
-input int      InpEndMinute            = 59;    // End minute (0-59)
+input int      InpEndHour              = 21;    // End hour (0-23)
+input int      InpEndMinute            = 0;     // End minute (0-59)
 input bool     InpTradeMonday          = true;
 input bool     InpTradeTuesday         = true;
 input bool     InpTradeWednesday       = true;
