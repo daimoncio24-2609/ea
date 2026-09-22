@@ -95,6 +95,11 @@ input group "=== Risk Control ==="
 input bool     InpUseMaxFloatingLoss    = true;  // Force-close a basket if its floating loss gets too big
 input double   InpMaxFloatingLossPercent = 10.0; // Max floating loss per basket, % of account balance
 
+//--- Global take-profit (close everything)
+input group "=== Global Take Profit (Close All) ==="
+input bool     InpUseGlobalTP           = true;  // Close ALL positions (both baskets) once total floating profit hits target
+input double   InpGlobalTPMoney         = 200.0; // Total floating profit target, in account currency
+
 //--- Trailing stop (per position, broker-side SL)
 input group "=== Trailing Stop ==="
 input bool     InpUseTrailingStop       = true;  // Enable per-position trailing stop
@@ -579,6 +584,29 @@ void CheckMaxFloatingLoss()
   }
 
 //+------------------------------------------------------------------+
+//| Global take-profit: once total floating profit across BOTH        |
+//| baskets combined reaches InpGlobalTPMoney (account currency),      |
+//| close everything -- unlike CheckBasketTakeProfit() (which closes  |
+//| each basket independently at its own price target), this looks at |
+//| the combined dollar P/L of the whole EA and can close a losing    |
+//| basket together with a winning one if the net is at target.       |
+//+------------------------------------------------------------------+
+void CheckGlobalTakeProfit()
+  {
+   if(!InpUseGlobalTP)
+      return;
+
+   double totalProfit = BasketFloatingProfit(TREND_BUY) + BasketFloatingProfit(TREND_SELL);
+   if(totalProfit >= InpGlobalTPMoney)
+     {
+      PrintFormat("Global TP hit: total floating profit %.2f >= target %.2f. Closing all positions.",
+                  totalProfit, InpGlobalTPMoney);
+      CloseDirection(TREND_BUY);
+      CloseDirection(TREND_SELL);
+     }
+  }
+
+//+------------------------------------------------------------------+
 //| Per-position trailing stop (broker-side SL). Once a position is   |
 //| more than InpTrailingStopPoints in profit, its SL trails behind   |
 //| price at that same distance, only moving again once the           |
@@ -783,6 +811,7 @@ void OnTick()
 
    ENUM_TREND h1Trend = GetH1Trend();
 
+   CheckGlobalTakeProfit();
    CheckBasketTakeProfit();
    CheckMaxFloatingLoss();
    ApplyTrailingStop();
@@ -805,15 +834,18 @@ void OnTick()
    double sellFloating = BasketFloatingProfit(TREND_SELL);
    double maxLoss      = balance * InpMaxFloatingLossPercent / 100.0;
 
+   double totalFloating = buyFloating + sellFloating;
+
    string trendStr = (h1Trend == TREND_BUY) ? "BUY" : (h1Trend == TREND_SELL) ? "SELL" : "NONE";
    Comment(StringFormat(
-           "ADX Trend Scalper (magic %d)\nH1 trend: %s\nSpread: %d pts (max %d)\nTrading time: %s | News: %s\nAveraging distance: %.0f pts | TP distance: %.0f pts\nDaily P/L: %.2f (%.1f%% / target %.1f%%)%s\nBUY basket: %.2f | SELL basket: %.2f (max loss -%.2f)\nOpen positions: %d",
+           "ADX Trend Scalper (magic %d)\nH1 trend: %s\nSpread: %d pts (max %d)\nTrading time: %s | News: %s\nAveraging distance: %.0f pts | TP distance: %.0f pts\nDaily P/L: %.2f (%.1f%% / target %.1f%%)%s\nBUY basket: %.2f | SELL basket: %.2f (max loss -%.2f)\nTotal floating: %.2f (global TP target %.2f)\nOpen positions: %d",
            InpMagicNumber, trendStr, (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD),
            InpMaxSpreadPoints, timeOK ? "OK" : "closed", newsOK ? "OK" : "blackout",
            AveragingDistance() / _Point, TakeProfitDistance() / _Point,
            dailyProfit, dailyPercent, InpDailyTargetPercent,
            g_dailyTargetHit ? " [TARGET HIT]" : "",
            buyFloating, sellFloating, maxLoss,
+           totalFloating, InpGlobalTPMoney,
            TotalPositionsForSymbolMagic()));
   }
 //+------------------------------------------------------------------+
