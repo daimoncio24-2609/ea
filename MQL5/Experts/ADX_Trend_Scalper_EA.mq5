@@ -34,6 +34,7 @@ input bool     InpUseCompounding        = false; // Scale lot with account balan
 input double   InpCompoundingBalanceStep = 100.0; // Balance increment that adds one InpCompoundingLotIncrement (tune to your account!)
 input double   InpCompoundingLotIncrement = 0.01; // Lot added per InpCompoundingBalanceStep of balance
 input double   InpMaxLots               = 1.0;   // Maximum lot size cap (with or without compounding)
+input double   InpLotMultiplier         = 1.1;   // Lot multiplier applied to each new averaging order vs. the basket's last order (1.0 = no multiplier)
 enum ENUM_AVG_MODE
   {
    AVG_MODE_FIXED_POINTS,  // Fixed distance in points
@@ -444,6 +445,25 @@ double AveragePrice(ENUM_TREND direction, double &totalVolume)
   }
 
 //+------------------------------------------------------------------+
+//| Clamp a lot to [InpLots, InpMaxLots], then to the broker's own    |
+//| min/max/step for this symbol.                                    |
+//+------------------------------------------------------------------+
+double NormalizeLot(double lot)
+  {
+   lot = MathMax(InpLots, MathMin(InpMaxLots, lot));
+
+   double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double minVol  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maxVol  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+
+   if(lotStep > 0.0)
+      lot = MathRound(lot / lotStep) * lotStep;
+   lot = MathMax(minVol, MathMin(maxVol, lot));
+
+   return lot;
+  }
+
+//+------------------------------------------------------------------+
 //| Lot size for a brand-new basket. Proportional to the account       |
 //| balance at the start of the day (so it scales down again during   |
 //| a drawdown, not just up), floored at InpLots and capped at        |
@@ -461,27 +481,18 @@ double ComputeLotSize()
       lot = InpLots + steps * InpCompoundingLotIncrement;
      }
 
-   lot = MathMax(InpLots, MathMin(InpMaxLots, lot));
-
-   double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-   double minVol  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-   double maxVol  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-
-   if(lotStep > 0.0)
-      lot = MathRound(lot / lotStep) * lotStep;
-   lot = MathMax(minVol, MathMin(maxVol, lot));
-
-   return lot;
+   return NormalizeLot(lot);
   }
 
 //+------------------------------------------------------------------+
-//| Lot size already used by an existing basket, so averaging orders  |
-//| match the lot the basket was opened with instead of picking up a  |
-//| freshly-compounded size mid-basket. Returns 0 if the basket is    |
-//| empty (caller should fall back to ComputeLotSize()).              |
+//| Lot size of the most recently opened position in a basket (by     |
+//| POSITION_TIME). Returns 0 if the basket is empty.                 |
 //+------------------------------------------------------------------+
-double GetBasketLot(ENUM_TREND direction)
+double GetLastBasketLot(ENUM_TREND direction)
   {
+   double   lastLot  = 0.0;
+   datetime lastTime = 0;
+
    for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
       ulong ticket = PositionGetTicket(i);
@@ -496,9 +507,29 @@ double GetBasketLot(ENUM_TREND direction)
       if(direction == TREND_BUY  && ptype != POSITION_TYPE_BUY)  continue;
       if(direction == TREND_SELL && ptype != POSITION_TYPE_SELL) continue;
 
-      return PositionGetDouble(POSITION_VOLUME);
+      datetime t = (datetime)PositionGetInteger(POSITION_TIME);
+      if(t >= lastTime)
+        {
+         lastTime = t;
+         lastLot  = PositionGetDouble(POSITION_VOLUME);
+        }
      }
-   return 0.0;
+   return lastLot;
+  }
+
+//+------------------------------------------------------------------+
+//| Lot size for the NEXT averaging order in an existing basket:      |
+//| the basket's last order's lot, multiplied by InpLotMultiplier     |
+//| (1.0 = flat, same lot every time; >1.0 = each level bigger than   |
+//| the last, i.e. classic martingale sizing). Falls back to          |
+//| ComputeLotSize() if the basket is somehow empty.                  |
+//+------------------------------------------------------------------+
+double NextAveragingLot(ENUM_TREND direction)
+  {
+   double lastLot = GetLastBasketLot(direction);
+   if(lastLot <= 0.0)
+      return ComputeLotSize();
+   return NormalizeLot(lastLot * InpLotMultiplier);
   }
 
 //+------------------------------------------------------------------+
@@ -745,8 +776,8 @@ void OpenMarket(ENUM_TREND direction, double lot, string comment)
 //| existing basket, up to InpMaxAveragingOrders positions total.    |
 //| Only averages while the H1 trend still agrees with the basket's  |
 //| direction, so a trend flip stops the basket from growing further |
-//| against the new H1 bias. Uses the basket's own existing lot size |
-//| (GetBasketLot) rather than recomputing compounding mid-basket.   |
+//| against the new H1 bias. Each new order's lot is the basket's    |
+//| last order's lot times InpLotMultiplier (see NextAveragingLot).  |
 //+------------------------------------------------------------------+
 void ManageAveraging(ENUM_TREND h1Trend)
   {
@@ -758,11 +789,7 @@ void ManageAveraging(ENUM_TREND h1Trend)
      {
       double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
       if(ask <= extremePrice - distance)
-        {
-         double lot = GetBasketLot(TREND_BUY);
-         if(lot <= 0.0) lot = ComputeLotSize();
-         OpenMarket(TREND_BUY, lot, "ADX-Scalper avg buy");
-        }
+         OpenMarket(TREND_BUY, NextAveragingLot(TREND_BUY), "ADX-Scalper avg buy");
      }
 
    int sellCount = CountPositions(TREND_SELL, extremePrice);
@@ -770,11 +797,7 @@ void ManageAveraging(ENUM_TREND h1Trend)
      {
       double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
       if(bid >= extremePrice + distance)
-        {
-         double lot = GetBasketLot(TREND_SELL);
-         if(lot <= 0.0) lot = ComputeLotSize();
-         OpenMarket(TREND_SELL, lot, "ADX-Scalper avg sell");
-        }
+         OpenMarket(TREND_SELL, NextAveragingLot(TREND_SELL), "ADX-Scalper avg sell");
      }
   }
 
