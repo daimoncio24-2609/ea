@@ -29,7 +29,7 @@ input double   InpMinDISpreadEntry   = 5.0;     // Min. DI+/DI- separation on th
 
 //--- Money management / averaging
 input group "=== Lot & Averaging ==="
-input double   InpLots                 = 0.01;  // Base/minimum lot size
+input double   InpLots                 = 0.05;  // Base/minimum lot size -- kept >= 0.05 so InpLotMultiplier has room to round up on a typical 0.01 volume step
 input bool     InpUseCompounding        = false; // Scale lot with account balance (compounding)
 input double   InpCompoundingBalanceStep = 100.0; // Balance increment that adds one InpCompoundingLotIncrement (tune to your account!)
 input double   InpCompoundingLotIncrement = 0.01; // Lot added per InpCompoundingBalanceStep of balance

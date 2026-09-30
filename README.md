@@ -32,7 +32,7 @@ Expert Advisor for MetaTrader 5: `MQL5/Experts/ADX_Trend_Scalper_EA.mq5`
 | `InpADXPeriodEntry` | 14 | ADX period on the entry timeframe |
 | `InpADXMinLevelEntry` | 20.0 | Min. ADX on the entry timeframe for a signal to count (filters choppy/no-momentum bars) |
 | `InpMinDISpreadEntry` | 5.0 | Min. DI+/DI- separation on the entry timeframe for a signal to count |
-| `InpLots` | 0.01 | Base/minimum lot size (also the fixed lot when compounding is off) |
+| `InpLots` | 0.05 | Base/minimum lot size (also the fixed lot when compounding is off) — kept ≥ 0.05 so `InpLotMultiplier` has room to round up on a typical 0.01 volume step |
 | `InpUseCompounding` | false | Scale a new basket's lot with account balance instead of always using `InpLots` |
 | `InpCompoundingBalanceStep` | 100.0 | Balance increment that adds one `InpCompoundingLotIncrement` — must be tuned to your account size |
 | `InpCompoundingLotIncrement` | 0.01 | Lot added per `InpCompoundingBalanceStep` of balance |
@@ -80,7 +80,7 @@ The EA now works directly in **broker points** (`InpAveragingPoints`, `InpTakePr
 
 `InpLotMultiplier` (default 1.1) makes each new averaging order's lot bigger than the basket's previous order: `lot = last order's lot × InpLotMultiplier`, rounded to the broker's lot step and capped at `InpMaxLots`. This is classic martingale sizing on top of the existing price-based grid — it makes it easier for a basket to reach break-even/profit once price comes back toward the average, but it also makes the worst case (price never comes back before `InpMaxAveragingOrders` is reached) meaningfully larger than flat-lot averaging, since later orders are both further from a favorable price *and* bigger.
 
-**Important rounding caveat:** the new lot is rounded to the broker's `SYMBOL_VOLUME_STEP` (commonly 0.01). At the default `InpLots = 0.01`, `0.01 × 1.1 = 0.011`, which rounds right back down to `0.01` — so with the default base lot, this multiplier has **no visible effect** until the lot has grown large enough that a 10% increase clears half a lot step (e.g. once it reaches `0.05`, `0.05 × 1.1 = 0.055` rounds up to `0.06`). If you want the multiplier to actually progress lot sizes from the very first averaging order, start `InpLots` at something like `0.05` or `0.1` instead of `0.01`, or use a larger `InpLotMultiplier`.
+**Important rounding caveat:** the new lot is rounded to the broker's `SYMBOL_VOLUME_STEP` (commonly 0.01). At a base lot of `0.01`, `0.01 × 1.1 = 0.011`, which rounds right back down to `0.01` — the multiplier would have **no visible effect** at all. That's why the default `InpLots` was raised to `0.05`: `0.05 × 1.1 = 0.055` rounds up to `0.06`, and it keeps progressing from there (`0.06 → 0.07 → 0.08 → 0.09 → …` over the next few averaging orders). If you lower `InpLots` back toward `0.01`, either raise `InpLotMultiplier` enough to clear half a lot step, or accept that the multiplier won't do anything until compounding or manual tuning grows the lot past that point.
 
 ## About lot compounding
 
