@@ -1,6 +1,11 @@
 # ADX Trend Scalper EA (MQL5)
 
-Expert Advisor for MetaTrader 5: `MQL5/Experts/ADX_Trend_Scalper_EA.mq5`
+Expert Advisor for MetaTrader 5, in two variants that share the exact same strategy/code logic and differ only in their input defaults:
+
+- `MQL5/Experts/ADX_Trend_Scalper_EA.mq5` — tuned for **XAUUSD (gold)**, magic number `202609`.
+- `MQL5/Experts/ADX_Trend_Scalper_EA_Forex.mq5` — tuned for **forex pairs**, magic number `202610`.
+
+Everything below describes the shared strategy. See "Forex vs XAUUSD defaults" for exactly what differs between the two files and why — attach whichever one matches the symbol on the chart (or copy a file's inputs as a starting point for a different symbol entirely; every distance in this EA is points/ATR-based, not a hardcoded "pip", so it's safe to point either file at other symbols once you re-check the inputs in that section).
 
 ## Strategy
 
@@ -90,6 +95,21 @@ Compounding is **off by default** because it multiplies risk with an already-mul
 - `InpCompoundingBalanceStep` and `InpCompoundingLotIncrement` have no safe universal default; they must be sized to *your* account balance and risk tolerance (e.g. for a $1,000 account you probably want a much bigger step than the $100 default, or a much smaller increment).
 - Always set `InpMaxLots` to a value you're genuinely willing to hold up to `InpMaxAveragingOrders` times over, on both sides at once.
 - Consider tightening `InpMaxFloatingLossPercent` and/or lowering `InpMaxAveragingOrders` when compounding is on, since the nominal size of the worst case grows with the account.
+
+## Forex vs XAUUSD defaults
+
+Both files are the identical strategy; only these inputs differ between `ADX_Trend_Scalper_EA.mq5` (XAUUSD) and `ADX_Trend_Scalper_EA_Forex.mq5` (forex):
+
+| Input | XAUUSD default | Forex default | Why |
+|---|---|---|---|
+| `InpMagicNumber` | 202609 | 202610 | So the two can run on different charts of the same account at once without their trade history/baskets mixing up in the terminal. |
+| `InpMaxSpreadPoints` | 50 | 20 | Forex majors on a 5-digit quote typically run a 5–20 point spread; 50 points is sized for gold's wider raw spread. Re-check your broker's actual typical spread for the pair you're trading and adjust. |
+| `InpAveragingPoints` (fallback, only used if `InpAveragingMode = Fixed points`) | 500 | 5000 | On a 5-digit forex pair, 1 pip = 10 points, so 5000 points = 500 pips — matching what "500 pips" classically means for forex. 500 raw points would be only 50 pips, too tight. This input is inactive under the default `ATR` mode either way. |
+| `InpTakeProfitPoints` (fallback, only used if `InpTakeProfitMode = Fixed points`) | 200 | 300 | 300 points = 30 pips on a 5-digit forex pair, a more standard scalp target than 200 points (20 pips). Also inactive under the default `ATR` mode. |
+
+Everything else — ADX/DI thresholds, the ATR multipliers, lot sizing and the multiplier, time/news filters, daily target, max floating loss, global TP, and the trailing stop — is identical between the two, since those are either account-size-based (money/% inputs, which are symbol-agnostic by construction) or ATR-based (which auto-scales to each symbol's own volatility rather than needing per-symbol retuning). The trailing stop's `300`/`200` points happen to read as a sensible `30`/`20` pips on a typical 5-digit forex pair already, so it wasn't changed for the forex file.
+
+None of this has been backtested per pair — treat both sets of defaults as a starting point, not a validated configuration, and re-tune `InpMaxSpreadPoints` in particular for the specific pair and broker you're trading.
 
 ## Risk note
 
