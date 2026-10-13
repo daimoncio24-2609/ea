@@ -123,8 +123,8 @@ This is a martingale-style averaging strategy: with `InpMaxAveragingOrders = 5`,
 
 ## Strategy
 
-1. **H1 trend filter:** EMA(50) above EMA(200), last H1 close above EMA(50), ADX(14) ≥ 20 and DI+ > DI- → BUY only. Mirror image → SELL only. Otherwise no trade.
-2. **Pullback entry (M15 by default):** on each new bar, BUY when RSI(14) dipped to 40 or lower somewhere in the last 6 closed bars (the pullback), RSI hooks back up on the last closed bar (it fires once, at the turn), that bar is bullish, and it closed above the M15 EMA(50) (the pullback held, it didn't turn into a reversal). SELL is the mirror (RSI rose to 60+, hooks down, bearish bar, close below the EMA). An earlier version required RSI(7) to cross back over 30 *and* close above the EMA on the very next bar — a deep dip like that almost always leaves price below the EMA, so it practically never fired. Buying a dip *inside* an established trend is the main source of the win rate.
+1. **H1 trend filter:** EMA(50) above EMA(200), last H1 close above EMA(200), and ADX(14) ≥ 15 → BUY only. Mirror image → SELL only. Otherwise no trade. (An earlier, stricter version also required the H1 close beyond EMA(50) and DI agreement; both flip during the very pullbacks this EA is waiting for, so the trend filter switched itself off right when a setup formed.)
+2. **Pullback entry (M15 by default):** on each new bar, BUY when RSI(14) dipped to 45 or lower within the last 12 closed bars (the pullback) and then crosses back up over 50 on the last closed bar (the trend resumes), on a bullish bar. SELL is the mirror (RSI rose to 55+, then crosses back down under 50, bearish bar). Triggering on the cross gives one signal per pullback. Earlier versions also required that turn bar to close beyond the M15 EMA(50); right after a real pullback price is on the wrong side of that EMA, so the two conditions almost never lined up and the EA barely traded.
 3. **SL / TP from ATR(M15):** SL = ATR × 2.0, TP = ATR × 1.0. SL is clamped to `InpMinSLPrice` (TP scales with it to keep the ratio); if the ATR SL would be larger than `InpMaxSLPrice` the trade is skipped (market too wild).
 4. **Break-even:** once price has covered 60% of the way to TP, the SL moves to entry + $0.30. A trade that went our way and then reversed closes as a small win instead of a full loss.
 5. **Risk sizing:** lot = 1% of balance ÷ loss-per-lot at the SL (or a fixed lot). Note the lot is floored at the broker's minimum lot, so on a very small account the real risk can be above `InpRiskPercent`.
@@ -147,12 +147,12 @@ The win rate comes from three things: trading only *with* the H1 trend, a TP tha
 | Input | Default | Meaning |
 |---|---|---|
 | `InpEMAFastH1` / `InpEMASlowH1` | 50 / 200 | H1 trend EMAs |
-| `InpADXPeriodH1` / `InpADXMinH1` | 14 / 20 | H1 ADX period and minimum strength |
+| `InpADXPeriodH1` / `InpADXMinH1` | 14 / 15 | H1 ADX period and minimum strength (0 = off) |
 | `InpEntryTimeframe` | M15 | Entry timeframe |
-| `InpEMAEntry` | 50 | EMA on the entry TF the pullback bar must close beyond |
 | `InpRSIPeriod` | 14 | RSI period on the entry TF |
-| `InpRSIBuyLevel` / `InpRSISellLevel` | 40 / 60 | RSI level the pullback must reach (BUY: at/below, SELL: at/above) |
-| `InpPullbackBars` | 6 | How many recent closed bars that RSI dip may lie within |
+| `InpRSIBuyLevel` / `InpRSISellLevel` | 45 / 55 | RSI level the pullback must reach (BUY: at/below, SELL: at/above) |
+| `InpRSITriggerLevel` | 50 | Entry fires when RSI crosses back over this level |
+| `InpPullbackBars` | 12 | How many recent closed bars the pullback may lie within |
 | `InpATRPeriod` | 14 | ATR period on the entry TF |
 | `InpSLATRMult` / `InpTPATRMult` | 2.0 / 1.0 | SL and TP distance as ATR multiples |
 | `InpMinSLPrice` / `InpMaxSLPrice` | 3.0 / 40.0 | SL clamp in price units ($); trade skipped above the max |

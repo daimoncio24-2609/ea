@@ -15,16 +15,16 @@ input group "=== Trend Filter (H1) ==="
 input int      InpEMAFastH1          = 50;      // Fast EMA period on H1
 input int      InpEMASlowH1          = 200;     // Slow EMA period on H1
 input int      InpADXPeriodH1        = 14;      // ADX period on H1
-input double   InpADXMinH1           = 20.0;    // Min. ADX on H1 to accept a trend
+input double   InpADXMinH1           = 15.0;    // Min. ADX on H1 to accept a trend (0 = off)
 
 //--- Entry (pullback)
 input group "=== Entry (Pullback) ==="
 input ENUM_TIMEFRAMES InpEntryTimeframe = PERIOD_M15; // Entry timeframe
-input int      InpEMAEntry           = 50;      // EMA on entry TF the pullback must respect
 input int      InpRSIPeriod          = 14;      // RSI period on entry TF
-input double   InpRSIBuyLevel        = 40.0;    // BUY: RSI must have dipped to/below this during the pullback
-input double   InpRSISellLevel       = 60.0;    // SELL: RSI must have risen to/above this during the pullback
-input int      InpPullbackBars       = 6;       // How many recent closed bars the RSI dip may lie within
+input double   InpRSIBuyLevel        = 45.0;    // BUY: RSI must have dipped to/below this during the pullback
+input double   InpRSISellLevel       = 55.0;    // SELL: RSI must have risen to/above this during the pullback
+input double   InpRSITriggerLevel    = 50.0;    // Entry fires when RSI crosses back over this level (BUY: up, SELL: down)
+input int      InpPullbackBars       = 12;      // How many recent closed bars the pullback may lie within
 
 //--- SL / TP
 input group "=== Stop Loss / Take Profit ==="
@@ -87,7 +87,6 @@ CTrade         trade;
 int            hEMAFastH1 = INVALID_HANDLE;
 int            hEMASlowH1 = INVALID_HANDLE;
 int            hADX_H1    = INVALID_HANDLE;
-int            hEMAEntry  = INVALID_HANDLE;
 int            hRSI       = INVALID_HANDLE;
 int            hATR       = INVALID_HANDLE;
 datetime       g_lastEntryBarTime = 0;
@@ -120,12 +119,11 @@ int OnInit()
    hEMAFastH1 = iMA(_Symbol, PERIOD_H1, InpEMAFastH1, 0, MODE_EMA, PRICE_CLOSE);
    hEMASlowH1 = iMA(_Symbol, PERIOD_H1, InpEMASlowH1, 0, MODE_EMA, PRICE_CLOSE);
    hADX_H1    = iADX(_Symbol, PERIOD_H1, InpADXPeriodH1);
-   hEMAEntry  = iMA(_Symbol, InpEntryTimeframe, InpEMAEntry, 0, MODE_EMA, PRICE_CLOSE);
    hRSI       = iRSI(_Symbol, InpEntryTimeframe, InpRSIPeriod, PRICE_CLOSE);
    hATR       = iATR(_Symbol, InpEntryTimeframe, InpATRPeriod);
 
    if(hEMAFastH1 == INVALID_HANDLE || hEMASlowH1 == INVALID_HANDLE || hADX_H1 == INVALID_HANDLE ||
-      hEMAEntry == INVALID_HANDLE || hRSI == INVALID_HANDLE || hATR == INVALID_HANDLE)
+      hRSI == INVALID_HANDLE || hATR == INVALID_HANDLE)
      {
       Print("Failed to create indicator handle(s).");
       return(INIT_FAILED);
@@ -143,7 +141,6 @@ void OnDeinit(const int reason)
    if(hEMAFastH1 != INVALID_HANDLE) IndicatorRelease(hEMAFastH1);
    if(hEMASlowH1 != INVALID_HANDLE) IndicatorRelease(hEMASlowH1);
    if(hADX_H1    != INVALID_HANDLE) IndicatorRelease(hADX_H1);
-   if(hEMAEntry  != INVALID_HANDLE) IndicatorRelease(hEMAEntry);
    if(hRSI       != INVALID_HANDLE) IndicatorRelease(hRSI);
    if(hATR       != INVALID_HANDLE) IndicatorRelease(hATR);
    Comment("");
@@ -254,39 +251,42 @@ bool IsNewsBlackout()
   }
 
 //+------------------------------------------------------------------+
-//| H1 trend: EMA fast above slow, last H1 close above the fast EMA, |
-//| ADX above InpADXMinH1 and DI agreeing => BUY (mirror for SELL).   |
-//| Only trading pullbacks *with* an established H1 trend is the main |
-//| source of this strategy's win rate.                              |
+//| H1 trend: EMA fast above slow and last H1 close above the slow    |
+//| EMA (plus optional min. ADX) => BUY; mirror image => SELL.        |
+//| Deliberately NOT stricter than that: a stricter version (close    |
+//| beyond the *fast* EMA + DI agreement) switched itself off during  |
+//| exactly the pullbacks this EA wants to trade, because a pullback  |
+//| pushes H1 back toward its fast EMA and flips DI for a few bars.   |
 //+------------------------------------------------------------------+
 ENUM_TREND GetH1Trend()
   {
-   double emaFast[], emaSlow[], adx[], plusDI[], minusDI[];
-   if(CopyBuffer(hEMAFastH1, 0, 1, 1, emaFast) <= 0)        return TREND_NONE;
-   if(CopyBuffer(hEMASlowH1, 0, 1, 1, emaSlow) <= 0)        return TREND_NONE;
-   if(CopyBuffer(hADX_H1, MAIN_LINE, 1, 1, adx) <= 0)       return TREND_NONE;
-   if(CopyBuffer(hADX_H1, PLUSDI_LINE, 1, 1, plusDI) <= 0)  return TREND_NONE;
-   if(CopyBuffer(hADX_H1, MINUSDI_LINE, 1, 1, minusDI) <= 0) return TREND_NONE;
+   double emaFast[], emaSlow[], adx[];
+   if(CopyBuffer(hEMAFastH1, 0, 1, 1, emaFast) <= 0)   return TREND_NONE;
+   if(CopyBuffer(hEMASlowH1, 0, 1, 1, emaSlow) <= 0)   return TREND_NONE;
+   if(CopyBuffer(hADX_H1, MAIN_LINE, 1, 1, adx) <= 0)  return TREND_NONE;
 
    double closeH1 = iClose(_Symbol, PERIOD_H1, 1);
    if(closeH1 <= 0.0 || adx[0] < InpADXMinH1)
       return TREND_NONE;
 
-   if(emaFast[0] > emaSlow[0] && closeH1 > emaFast[0] && plusDI[0] > minusDI[0])
+   if(emaFast[0] > emaSlow[0] && closeH1 > emaSlow[0])
       return TREND_BUY;
-   if(emaFast[0] < emaSlow[0] && closeH1 < emaFast[0] && minusDI[0] > plusDI[0])
+   if(emaFast[0] < emaSlow[0] && closeH1 < emaSlow[0])
       return TREND_SELL;
    return TREND_NONE;
   }
 
 //+------------------------------------------------------------------+
 //| Pullback trigger on the last closed entry-TF bar (bar 1):         |
-//| BUY  - RSI dipped to/below InpRSIBuyLevel somewhere in the last   |
-//|        InpPullbackBars bars (the pullback), RSI hooks up on bar 1 |
-//|        (bar1 > bar2 <= bar3, so it fires once at the turn), bar 1 |
-//|        is bullish and closed above the entry-TF EMA (the pullback |
-//|        held instead of turning into a reversal).                  |
+//| BUY  - within the last InpPullbackBars bars RSI dipped to/below   |
+//|        InpRSIBuyLevel (the pullback), and on bar 1 RSI crosses    |
+//|        back up over InpRSITriggerLevel (the trend resumes) on a   |
+//|        bullish bar. Firing on the cross means one signal per      |
+//|        pullback, not one per bar.                                 |
 //| SELL - mirror image.                                              |
+//| An earlier version also demanded that the very first turn bar     |
+//| close beyond the entry-TF EMA; after a real pullback price is on  |
+//| the wrong side of that EMA, so the two almost never coincided.    |
 //| 'reason' explains a rejection, for the debug log.                 |
 //+------------------------------------------------------------------+
 ENUM_TREND GetPullbackSignal(ENUM_TREND trend, string &reason)
@@ -295,20 +295,19 @@ ENUM_TREND GetPullbackSignal(ENUM_TREND trend, string &reason)
    if(trend == TREND_NONE)
      { reason = "no H1 trend"; return TREND_NONE; }
 
-   int bars = MathMax(InpPullbackBars, 3);
-   double rsi[], ema[];
+   int bars = MathMax(InpPullbackBars, 2) + 1;
+   double rsi[];
    ArraySetAsSeries(rsi, true);
    if(CopyBuffer(hRSI, 0, 1, bars, rsi) < bars)  { reason = "RSI not ready"; return TREND_NONE; }
-   if(CopyBuffer(hEMAEntry, 0, 1, 1, ema) <= 0)  { reason = "EMA not ready"; return TREND_NONE; }
 
    double open1  = iOpen(_Symbol, InpEntryTimeframe, 1);
    double close1 = iClose(_Symbol, InpEntryTimeframe, 1);
    if(open1 <= 0.0 || close1 <= 0.0)
      { reason = "no bar data"; return TREND_NONE; }
 
-   // rsi[0] = bar 1 (last closed), rsi[1] = bar 2, ...
-   double rsiMin = rsi[0], rsiMax = rsi[0];
-   for(int i = 1; i < bars; i++)
+   // rsi[0] = bar 1 (last closed), rsi[1] = bar 2, ...; the pullback is looked for in bars 2..N+1
+   double rsiMin = rsi[1], rsiMax = rsi[1];
+   for(int i = 2; i < bars; i++)
      {
       rsiMin = MathMin(rsiMin, rsi[i]);
       rsiMax = MathMax(rsiMax, rsi[i]);
@@ -317,24 +316,20 @@ ENUM_TREND GetPullbackSignal(ENUM_TREND trend, string &reason)
    if(trend == TREND_BUY)
      {
       if(rsiMin > InpRSIBuyLevel)
-        { reason = StringFormat("BUY: no pullback (min RSI %.1f > %.1f)", rsiMin, InpRSIBuyLevel); return TREND_NONE; }
-      if(!(rsi[0] > rsi[1] && rsi[1] <= rsi[2]))
-        { reason = StringFormat("BUY: RSI not hooking up (%.1f/%.1f/%.1f)", rsi[2], rsi[1], rsi[0]); return TREND_NONE; }
+        { reason = StringFormat("BUY: waiting for pullback (min RSI %.1f > %.1f)", rsiMin, InpRSIBuyLevel); return TREND_NONE; }
+      if(!(rsi[0] > InpRSITriggerLevel && rsi[1] <= InpRSITriggerLevel))
+        { reason = StringFormat("BUY: pullback seen, waiting for RSI to cross up %.0f (now %.1f)", InpRSITriggerLevel, rsi[0]); return TREND_NONE; }
       if(close1 <= open1)
         { reason = "BUY: trigger bar not bullish"; return TREND_NONE; }
-      if(close1 <= ema[0])
-        { reason = StringFormat("BUY: close %.2f not above EMA %.2f", close1, ema[0]); return TREND_NONE; }
       return TREND_BUY;
      }
 
    if(rsiMax < InpRSISellLevel)
-     { reason = StringFormat("SELL: no pullback (max RSI %.1f < %.1f)", rsiMax, InpRSISellLevel); return TREND_NONE; }
-   if(!(rsi[0] < rsi[1] && rsi[1] >= rsi[2]))
-     { reason = StringFormat("SELL: RSI not hooking down (%.1f/%.1f/%.1f)", rsi[2], rsi[1], rsi[0]); return TREND_NONE; }
+     { reason = StringFormat("SELL: waiting for pullback (max RSI %.1f < %.1f)", rsiMax, InpRSISellLevel); return TREND_NONE; }
+   if(!(rsi[0] < InpRSITriggerLevel && rsi[1] >= InpRSITriggerLevel))
+     { reason = StringFormat("SELL: pullback seen, waiting for RSI to cross down %.0f (now %.1f)", InpRSITriggerLevel, rsi[0]); return TREND_NONE; }
    if(close1 >= open1)
      { reason = "SELL: trigger bar not bearish"; return TREND_NONE; }
-   if(close1 >= ema[0])
-     { reason = StringFormat("SELL: close %.2f not below EMA %.2f", close1, ema[0]); return TREND_NONE; }
    return TREND_SELL;
   }
 
