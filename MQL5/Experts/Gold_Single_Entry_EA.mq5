@@ -40,6 +40,14 @@ input bool     InpUseBreakEven       = true;    // Move SL to entry once the tra
 input double   InpBETriggerPercent   = 60.0;    // Trigger: price has covered this % of the TP distance
 input double   InpBELockPrice        = 0.30;    // SL is placed this far past entry, in price units ($) - covers spread/commission
 
+//--- Dynamic trailing stop (ATR based)
+input group "=== Dynamic Trailing Stop (ATR) ==="
+input bool     InpUseTrailing        = true;    // Trail the SL behind price once the trade is in profit
+input double   InpTrailStartATR      = 0.6;     // Start trailing once profit >= ATR(entry TF) * this
+input double   InpTrailATRMult       = 0.5;     // Trailing distance behind price = current ATR(entry TF) * this
+input double   InpTrailStepPrice     = 0.20;    // Only move the SL when it improves by at least this much ($)
+input bool     InpTrailRemoveTP      = false;   // Remove the TP once trailing starts and let the trail take the exit
+
 //--- Money management
 input group "=== Money Management ==="
 input bool     InpUseRiskPercent     = true;    // Size the lot from InpRiskPercent and the SL distance
@@ -601,6 +609,67 @@ void ManageBreakEven()
 //| Deal history only changes on a trade event (or a new day), so it  |
 //| is re-read then instead of on every tick.                         |
 //+------------------------------------------------------------------+
+//| Dynamic trailing stop. The distance is the *current* ATR of the   |
+//| entry timeframe times InpTrailATRMult, so it widens when gold     |
+//| gets volatile (fewer premature stop-outs) and tightens when it    |
+//| calms down (locks in more). It starts once profit reaches         |
+//| ATR * InpTrailStartATR, only ever moves the SL in the trade's     |
+//| favour, and never places it worse than break-even + lock, so a    |
+//| trailed exit is always a (small or large) win.                    |
+//+------------------------------------------------------------------+
+void ManageTrailingStop()
+  {
+   if(!InpUseTrailing)
+      return;
+
+   double atr[];
+   if(CopyBuffer(hATR, 0, 1, 1, atr) <= 0 || atr[0] <= 0.0)
+      return;
+
+   double startDist = atr[0] * InpTrailStartATR;
+   double trailDist = atr[0] * InpTrailATRMult;
+   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   double stopsLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+   trailDist = MathMax(trailDist, stopsLevel + _Point);
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket))
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol ||
+         PositionGetInteger(POSITION_MAGIC) != InpMagicNumber)
+         continue;
+
+      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl = PositionGetDouble(POSITION_SL);
+      double tp = PositionGetDouble(POSITION_TP);
+      double newTP = InpTrailRemoveTP ? 0.0 : tp;
+
+      if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+        {
+         double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+         if(bid - openPrice < startDist)
+            continue;
+         double newSL = NormalizeDouble(bid - trailDist, digits);
+         newSL = MathMax(newSL, NormalizeDouble(openPrice + InpBELockPrice, digits));
+         if(newSL < bid - stopsLevel && (sl == 0.0 || newSL - sl >= InpTrailStepPrice))
+            trade.PositionModify(ticket, newSL, newTP);
+        }
+      else
+        {
+         double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+         if(openPrice - ask < startDist)
+            continue;
+         double newSL = NormalizeDouble(ask + trailDist, digits);
+         newSL = MathMin(newSL, NormalizeDouble(openPrice - InpBELockPrice, digits));
+         if(newSL > ask + stopsLevel && (sl == 0.0 || sl - newSL >= InpTrailStepPrice))
+            trade.PositionModify(ticket, newSL, newTP);
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
 void OnTrade()
   {
    g_statsDirty = true;
@@ -622,6 +691,7 @@ void OnTick()
    UpdateDayStart();
    RefreshStats();
    ManageBreakEven();
+   ManageTrailingStop();
 
    ENUM_TREND trend = GetH1Trend();
 

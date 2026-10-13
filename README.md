@@ -127,6 +127,7 @@ This is a martingale-style averaging strategy: with `InpMaxAveragingOrders = 5`,
 2. **Pullback entry (M15 by default):** on each new bar, BUY when RSI(14) dipped to 45 or lower within the last 12 closed bars (the pullback) and then crosses back up over 50 on the last closed bar (the trend resumes), on a bullish bar. SELL is the mirror (RSI rose to 55+, then crosses back down under 50, bearish bar). Triggering on the cross gives one signal per pullback. Earlier versions also required that turn bar to close beyond the M15 EMA(50); right after a real pullback price is on the wrong side of that EMA, so the two conditions almost never lined up and the EA barely traded.
 3. **SL / TP from ATR(M15):** SL = ATR × 2.0, TP = ATR × 1.0. SL is clamped to `InpMinSLPrice` (TP scales with it to keep the ratio); if the ATR SL would be larger than `InpMaxSLPrice` the trade is skipped (market too wild).
 4. **Break-even:** once price has covered 60% of the way to TP, the SL moves to entry + $0.30. A trade that went our way and then reversed closes as a small win instead of a full loss.
+4b. **Dynamic trailing stop (ATR):** once profit reaches ATR(M15) × 0.6, the SL trails behind price at the *current* ATR(M15) × 0.5, moving only in the trade's favour and in steps of at least $0.20. Because the distance follows live ATR, it gives the trade more room when gold is volatile and tightens when it calms. The trailed SL is never placed worse than break-even + $0.30, so a trailed exit is always a win. By default the TP stays in place (the trail just protects profit on the way there); set `InpTrailRemoveTP = true` to drop the TP once trailing starts and let strong moves run — fewer trades reach a fixed target, but the winners can be much bigger.
 5. **Risk sizing:** lot = 1% of balance ÷ loss-per-lot at the SL (or a fixed lot). Note the lot is floored at the broker's minimum lot, so on a very small account the real risk can be above `InpRiskPercent`.
 6. **Daily limits:** max 3 entries per day, stop for the day after the first loss, and stop for the day once closed losses reach 3% of the day-start balance.
 7. **Time / news / spread filters:** 09:00–20:00 server time (Friday until 14:00), no new entry 60 min before/after high-impact XAU/USD news, max spread $0.60.
@@ -159,6 +160,11 @@ The win rate comes from three things: trading only *with* the H1 trend, a TP tha
 | `InpUseBreakEven` | true | Enable break-even |
 | `InpBETriggerPercent` | 60 | % of the TP distance that triggers break-even |
 | `InpBELockPrice` | 0.30 | Distance ($) beyond entry the break-even SL is placed at |
+| `InpUseTrailing` | true | Enable the dynamic ATR trailing stop |
+| `InpTrailStartATR` | 0.6 | Start trailing once profit ≥ ATR × this |
+| `InpTrailATRMult` | 0.5 | Trailing distance behind price = current ATR × this |
+| `InpTrailStepPrice` | 0.20 | Minimum SL improvement ($) before it is moved again |
+| `InpTrailRemoveTP` | false | Drop the TP once trailing starts and let the trail take the exit |
 | `InpUseRiskPercent` / `InpRiskPercent` | true / 1.0 | Risk-based lot sizing, % of balance per trade |
 | `InpFixedLots` / `InpMaxLots` | 0.01 / 1.0 | Fixed lot (when risk sizing is off) and lot cap |
 | `InpMaxTradesPerDay` | 3 | Max entries per day |
