@@ -21,23 +21,24 @@ input double   InpADXMinH1           = 20.0;    // Min. ADX on H1 to accept a tr
 input group "=== Entry (Pullback) ==="
 input ENUM_TIMEFRAMES InpEntryTimeframe = PERIOD_M15; // Entry timeframe
 input int      InpEMAEntry           = 50;      // EMA on entry TF the pullback must respect
-input int      InpRSIPeriod          = 7;       // RSI period on entry TF
-input double   InpRSIBuyLevel        = 30.0;    // BUY: RSI dips below this and crosses back above it
-input double   InpRSISellLevel       = 70.0;    // SELL: RSI pops above this and crosses back below it
+input int      InpRSIPeriod          = 14;      // RSI period on entry TF
+input double   InpRSIBuyLevel        = 40.0;    // BUY: RSI must have dipped to/below this during the pullback
+input double   InpRSISellLevel       = 60.0;    // SELL: RSI must have risen to/above this during the pullback
+input int      InpPullbackBars       = 6;       // How many recent closed bars the RSI dip may lie within
 
 //--- SL / TP
 input group "=== Stop Loss / Take Profit ==="
 input int      InpATRPeriod          = 14;      // ATR period on entry TF
 input double   InpSLATRMult          = 2.0;     // SL distance = ATR(entry TF) * this
 input double   InpTPATRMult          = 1.0;     // TP distance = ATR(entry TF) * this
-input int      InpMinSLPoints        = 300;     // Lower clamp for SL distance (points)
-input int      InpMaxSLPoints        = 2500;    // Upper clamp for SL distance (points); skip trade if ATR SL is bigger
+input double   InpMinSLPrice         = 3.0;     // Lower clamp for SL distance, in price units ($ for XAUUSD)
+input double   InpMaxSLPrice         = 40.0;    // Skip the trade if the ATR SL is bigger than this, in price units ($)
 
 //--- Break-even
 input group "=== Break-even ==="
 input bool     InpUseBreakEven       = true;    // Move SL to entry once the trade is far enough in profit
 input double   InpBETriggerPercent   = 60.0;    // Trigger: price has covered this % of the TP distance
-input int      InpBELockPoints       = 30;      // SL is placed this many points past entry (covers spread/commission)
+input double   InpBELockPrice        = 0.30;    // SL is placed this far past entry, in price units ($) - covers spread/commission
 
 //--- Money management
 input group "=== Money Management ==="
@@ -54,9 +55,10 @@ input double   InpMaxDailyLossPercent = 3.0;    // Stop for the day once today's
 
 //--- Filters / identification
 input group "=== Filters ==="
-input int      InpMaxSpreadPoints    = 40;      // Max allowed spread (points)
+input double   InpMaxSpreadPrice     = 0.60;    // Max allowed spread, in price units ($ for XAUUSD)
+input bool     InpDebugLog           = true;    // Print why no trade was opened, once per entry-TF bar
 input int      InpMagicNumber        = 202611;  // Magic number
-input int      InpSlippagePoints     = 10;      // Max deviation for orders (points)
+input int      InpSlippagePoints     = 50;      // Max deviation for orders (points)
 
 //--- Time filter
 input group "=== Time Filter (broker/server time) ==="
@@ -91,6 +93,8 @@ int            hATR       = INVALID_HANDLE;
 datetime       g_lastEntryBarTime = 0;
 datetime       g_currentDayStart  = 0;
 double         g_dayStartBalance  = 0.0;
+string         g_lastStatus       = "";
+datetime       g_lastLogBarTime   = 0;
 bool           g_statsDirty       = true;   // re-read deal history on the next tick
 int            g_todayEntries = 0, g_todayLosses = 0;
 double         g_todayNet     = 0.0;
@@ -109,6 +113,9 @@ int OnInit()
   {
    trade.SetExpertMagicNumber(InpMagicNumber);
    trade.SetDeviationInPoints(InpSlippagePoints);
+   // Use a filling mode the symbol actually supports; CTrade's FOK default
+   // gets every order rejected (retcode 10030) on brokers that only allow IOC.
+   trade.SetTypeFillingBySymbol(_Symbol);
 
    hEMAFastH1 = iMA(_Symbol, PERIOD_H1, InpEMAFastH1, 0, MODE_EMA, PRICE_CLOSE);
    hEMASlowH1 = iMA(_Symbol, PERIOD_H1, InpEMASlowH1, 0, MODE_EMA, PRICE_CLOSE);
@@ -143,9 +150,17 @@ void OnDeinit(const int reason)
   }
 
 //+------------------------------------------------------------------+
+//| Spread is compared in price units, not points: XAUUSD is quoted   |
+//| with 2 digits by some brokers and 3 by others, so a points limit  |
+//| sized for one silently blocks every trade on the other.           |
+double CurrentSpread()
+  {
+   return SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID);
+  }
+
 bool SpreadOK()
   {
-   return SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) <= InpMaxSpreadPoints;
+   return CurrentSpread() <= InpMaxSpreadPrice;
   }
 
 //+------------------------------------------------------------------+
@@ -265,41 +280,61 @@ ENUM_TREND GetH1Trend()
   }
 
 //+------------------------------------------------------------------+
-//| Pullback trigger on the last closed entry-TF bar:                 |
-//| BUY  - RSI was below InpRSIBuyLevel on the previous bar and has   |
-//|        just crossed back above it, the bar is bullish and closed above the entry-TF EMA       |
-//|        (pullback held, didn't turn into a reversal).              |
+//| Pullback trigger on the last closed entry-TF bar (bar 1):         |
+//| BUY  - RSI dipped to/below InpRSIBuyLevel somewhere in the last   |
+//|        InpPullbackBars bars (the pullback), RSI hooks up on bar 1 |
+//|        (bar1 > bar2 <= bar3, so it fires once at the turn), bar 1 |
+//|        is bullish and closed above the entry-TF EMA (the pullback |
+//|        held instead of turning into a reversal).                  |
 //| SELL - mirror image.                                              |
+//| 'reason' explains a rejection, for the debug log.                 |
 //+------------------------------------------------------------------+
-ENUM_TREND GetPullbackSignal(ENUM_TREND trend)
+ENUM_TREND GetPullbackSignal(ENUM_TREND trend, string &reason)
   {
+   reason = "";
    if(trend == TREND_NONE)
-      return TREND_NONE;
+     { reason = "no H1 trend"; return TREND_NONE; }
 
+   int bars = MathMax(InpPullbackBars, 3);
    double rsi[], ema[];
    ArraySetAsSeries(rsi, true);
-   if(CopyBuffer(hRSI, 0, 1, 2, rsi) < 2)        return TREND_NONE;
-   if(CopyBuffer(hEMAEntry, 0, 1, 1, ema) <= 0)  return TREND_NONE;
+   if(CopyBuffer(hRSI, 0, 1, bars, rsi) < bars)  { reason = "RSI not ready"; return TREND_NONE; }
+   if(CopyBuffer(hEMAEntry, 0, 1, 1, ema) <= 0)  { reason = "EMA not ready"; return TREND_NONE; }
 
    double open1  = iOpen(_Symbol, InpEntryTimeframe, 1);
    double close1 = iClose(_Symbol, InpEntryTimeframe, 1);
    if(open1 <= 0.0 || close1 <= 0.0)
-      return TREND_NONE;
+     { reason = "no bar data"; return TREND_NONE; }
 
-   // rsi[0] = last closed bar, rsi[1..] = older bars
+   // rsi[0] = bar 1 (last closed), rsi[1] = bar 2, ...
+   double rsiMin = rsi[0], rsiMax = rsi[0];
+   for(int i = 1; i < bars; i++)
+     {
+      rsiMin = MathMin(rsiMin, rsi[i]);
+      rsiMax = MathMax(rsiMax, rsi[i]);
+     }
+
    if(trend == TREND_BUY)
      {
-      if(rsi[0] <= InpRSIBuyLevel || rsi[1] > InpRSIBuyLevel)
-         return TREND_NONE;           // not a fresh cross back above the level
-      if(close1 <= open1 || close1 <= ema[0])
-         return TREND_NONE;
+      if(rsiMin > InpRSIBuyLevel)
+        { reason = StringFormat("BUY: no pullback (min RSI %.1f > %.1f)", rsiMin, InpRSIBuyLevel); return TREND_NONE; }
+      if(!(rsi[0] > rsi[1] && rsi[1] <= rsi[2]))
+        { reason = StringFormat("BUY: RSI not hooking up (%.1f/%.1f/%.1f)", rsi[2], rsi[1], rsi[0]); return TREND_NONE; }
+      if(close1 <= open1)
+        { reason = "BUY: trigger bar not bullish"; return TREND_NONE; }
+      if(close1 <= ema[0])
+        { reason = StringFormat("BUY: close %.2f not above EMA %.2f", close1, ema[0]); return TREND_NONE; }
       return TREND_BUY;
      }
 
-   if(rsi[0] >= InpRSISellLevel || rsi[1] < InpRSISellLevel)
-      return TREND_NONE;
-   if(close1 >= open1 || close1 >= ema[0])
-      return TREND_NONE;
+   if(rsiMax < InpRSISellLevel)
+     { reason = StringFormat("SELL: no pullback (max RSI %.1f < %.1f)", rsiMax, InpRSISellLevel); return TREND_NONE; }
+   if(!(rsi[0] < rsi[1] && rsi[1] >= rsi[2]))
+     { reason = StringFormat("SELL: RSI not hooking down (%.1f/%.1f/%.1f)", rsi[2], rsi[1], rsi[0]); return TREND_NONE; }
+   if(close1 >= open1)
+     { reason = "SELL: trigger bar not bearish"; return TREND_NONE; }
+   if(close1 >= ema[0])
+     { reason = StringFormat("SELL: close %.2f not below EMA %.2f", close1, ema[0]); return TREND_NONE; }
    return TREND_SELL;
   }
 
@@ -369,7 +404,7 @@ void GetTodayStats(int &entries, int &losses, double &netProfit)
 
 //+------------------------------------------------------------------+
 //| All-time win/loss count for this symbol/magic (for the on-chart   |
-//| comment). A trade closed at break-even + InpBELockPoints counts   |
+//| comment). A trade closed at break-even + InpBELockPrice counts    |
 //| as a (small) win, since its net result is positive.               |
 //+------------------------------------------------------------------+
 void GetAllTimeStats(int &wins, int &losses, double &netProfit)
@@ -473,11 +508,11 @@ void TryOpen(ENUM_TREND signal)
 
    double slDist = atr[0] * InpSLATRMult;
    double tpDist = atr[0] * InpTPATRMult;
-   double minSL  = InpMinSLPoints * _Point;
-   double maxSL  = InpMaxSLPoints * _Point;
+   double minSL  = InpMinSLPrice;
+   double maxSL  = InpMaxSLPrice;
    if(slDist > maxSL)
      {
-      PrintFormat("Skip: ATR-based SL %.0f pts exceeds InpMaxSLPoints (market too volatile).", slDist / _Point);
+      PrintFormat("Skip: ATR-based SL %.2f exceeds InpMaxSLPrice %.2f (market too volatile).", slDist, maxSL);
       return;
      }
    if(slDist < minSL)
@@ -489,7 +524,10 @@ void TryOpen(ENUM_TREND signal)
 
    double stopsLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
    if(tpDist <= stopsLevel || slDist <= stopsLevel)
+     {
+      PrintFormat("Skip: TP %.2f / SL %.2f inside broker stops level %.2f.", tpDist, slDist, stopsLevel);
       return;
+     }
 
    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    if(signal == TREND_BUY)
@@ -513,7 +551,7 @@ void TryOpen(ENUM_TREND signal)
   }
 
 //+------------------------------------------------------------------+
-//| Move SL to entry + InpBELockPoints once price has covered         |
+//| Move SL to entry + InpBELockPrice once price has covered          |
 //| InpBETriggerPercent of the way to TP. Turns a lot of would-be     |
 //| losers (trade goes our way, then reverses) into small wins.       |
 //+------------------------------------------------------------------+
@@ -542,7 +580,7 @@ void ManageBreakEven()
 
       double tpDist = MathAbs(tp - openPrice);
       double trigger = tpDist * InpBETriggerPercent / 100.0;
-      double lock = InpBELockPoints * _Point;
+      double lock = InpBELockPrice;
 
       if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
         {
@@ -587,9 +625,11 @@ void OnTick()
    RefreshStats();
    ManageBreakEven();
 
-   bool newBar = IsNewEntryBar();
    ENUM_TREND trend = GetH1Trend();
 
+   // The new-bar flag is only consumed once every other filter passes, so a
+   // momentary block on a bar's first tick (spread widening at bar open is
+   // common on gold) doesn't throw away that bar's signal.
    string status = "waiting for setup";
    string limitReason = "";
    if(HasOpenPosition())
@@ -601,22 +641,44 @@ void OnTick()
    else if(IsNewsBlackout())
       status = "news blackout";
    else if(!SpreadOK())
-      status = "spread too wide";
+      status = StringFormat("spread too wide (%.2f > %.2f)", CurrentSpread(), InpMaxSpreadPrice);
    else if(trend == TREND_NONE)
       status = "no H1 trend";
-   else if(newBar)
+   else if(IsNewEntryBar())
      {
-      ENUM_TREND signal = GetPullbackSignal(trend);
+      string reason;
+      ENUM_TREND signal = GetPullbackSignal(trend, reason);
       if(signal != TREND_NONE)
+        {
+         status = "signal " + (signal == TREND_BUY ? "BUY" : "SELL");
          TryOpen(signal);
+        }
+      else
+         status = reason;
+      g_lastStatus = status;
+     }
+   else
+      status = g_lastStatus == "" ? status : g_lastStatus;
+
+   // One debug line per entry-TF bar, so the Experts log shows why nothing traded
+   datetime barTime = iTime(_Symbol, InpEntryTimeframe, 0);
+   if(InpDebugLog && barTime != g_lastLogBarTime)
+     {
+      g_lastLogBarTime = barTime;
+      PrintFormat("[%s] H1 trend=%s | %s", TimeToString(TimeCurrent(), TIME_DATE | TIME_MINUTES),
+                  trend == TREND_BUY ? "BUY" : (trend == TREND_SELL ? "SELL" : "NONE"), status);
      }
 
+   double atr[];
+   double atrVal = (CopyBuffer(hATR, 0, 1, 1, atr) > 0) ? atr[0] : 0.0;
    int total = g_allWins + g_allLosses;
    double winRate = total > 0 ? 100.0 * g_allWins / total : 0.0;
 
    Comment(StringFormat("Gold Single Entry EA\nH1 trend: %s\nStatus: %s\n"
+                        "Spread: %.2f (max %.2f)  ATR SL: %.2f (max %.2f)\n"
                         "Trades: %d  Wins: %d  Losses: %d  Win rate: %.1f%%\nNet P/L: %.2f",
                         trend == TREND_BUY ? "BUY" : (trend == TREND_SELL ? "SELL" : "NONE"),
-                        status, total, g_allWins, g_allLosses, winRate, g_allNet));
+                        status, CurrentSpread(), InpMaxSpreadPrice, atrVal * InpSLATRMult, InpMaxSLPrice,
+                        total, g_allWins, g_allLosses, winRate, g_allNet));
   }
 //+------------------------------------------------------------------+

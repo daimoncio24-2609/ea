@@ -124,13 +124,15 @@ This is a martingale-style averaging strategy: with `InpMaxAveragingOrders = 5`,
 ## Strategy
 
 1. **H1 trend filter:** EMA(50) above EMA(200), last H1 close above EMA(50), ADX(14) ≥ 20 and DI+ > DI- → BUY only. Mirror image → SELL only. Otherwise no trade.
-2. **Pullback entry (M15 by default):** on each new bar, BUY when RSI(7) was below 30 on the previous bar and has just closed back above 30, the closed bar is bullish, and it closed above the M15 EMA(50) (the pullback held, it didn't turn into a reversal). SELL is the mirror (RSI back below 70, bearish bar, close below the EMA). Buying a dip *inside* an established trend is the main source of the win rate.
-3. **SL / TP from ATR(M15):** SL = ATR × 2.0, TP = ATR × 1.0. SL is clamped to `InpMinSLPoints` (TP scales with it to keep the ratio); if the ATR SL would be larger than `InpMaxSLPoints` the trade is skipped (market too wild).
-4. **Break-even:** once price has covered 60% of the way to TP, the SL moves to entry + 30 points. A trade that went our way and then reversed closes as a small win instead of a full loss.
+2. **Pullback entry (M15 by default):** on each new bar, BUY when RSI(14) dipped to 40 or lower somewhere in the last 6 closed bars (the pullback), RSI hooks back up on the last closed bar (it fires once, at the turn), that bar is bullish, and it closed above the M15 EMA(50) (the pullback held, it didn't turn into a reversal). SELL is the mirror (RSI rose to 60+, hooks down, bearish bar, close below the EMA). An earlier version required RSI(7) to cross back over 30 *and* close above the EMA on the very next bar — a deep dip like that almost always leaves price below the EMA, so it practically never fired. Buying a dip *inside* an established trend is the main source of the win rate.
+3. **SL / TP from ATR(M15):** SL = ATR × 2.0, TP = ATR × 1.0. SL is clamped to `InpMinSLPrice` (TP scales with it to keep the ratio); if the ATR SL would be larger than `InpMaxSLPrice` the trade is skipped (market too wild).
+4. **Break-even:** once price has covered 60% of the way to TP, the SL moves to entry + $0.30. A trade that went our way and then reversed closes as a small win instead of a full loss.
 5. **Risk sizing:** lot = 1% of balance ÷ loss-per-lot at the SL (or a fixed lot). Note the lot is floored at the broker's minimum lot, so on a very small account the real risk can be above `InpRiskPercent`.
 6. **Daily limits:** max 3 entries per day, stop for the day after the first loss, and stop for the day once closed losses reach 3% of the day-start balance.
-7. **Time / news / spread filters:** 09:00–20:00 server time (Friday until 14:00), no new entry 60 min before/after high-impact XAU/USD news, max spread 40 points.
-8. The on-chart comment shows the H1 trend, why the EA is (not) trading right now, and the all-time win rate / net P/L of this magic number.
+7. **Time / news / spread filters:** 09:00–20:00 server time (Friday until 14:00), no new entry 60 min before/after high-impact XAU/USD news, max spread $0.60.
+8. The on-chart comment shows the H1 trend, why the EA is (not) trading right now, the live spread and ATR SL against their limits, and the all-time win rate / net P/L of this magic number. With `InpDebugLog` on, the Experts tab gets one line per M15 bar saying why no trade was opened.
+
+**Price units, not points:** spread, SL clamps and the break-even lock are in price units (USD for XAUUSD), not broker points. XAUUSD is quoted with 2 digits by some brokers and 3 by others, so a points limit sized for one is 10× off on the other — the first version's 40-point spread limit blocked every trade on 3-digit gold quotes. Orders also use the symbol's own filling mode (`SetTypeFillingBySymbol`), since many brokers reject the CTrade default (FOK) on gold.
 
 ## Why the win rate is high — and what that costs
 
@@ -148,20 +150,23 @@ The win rate comes from three things: trading only *with* the H1 trend, a TP tha
 | `InpADXPeriodH1` / `InpADXMinH1` | 14 / 20 | H1 ADX period and minimum strength |
 | `InpEntryTimeframe` | M15 | Entry timeframe |
 | `InpEMAEntry` | 50 | EMA on the entry TF the pullback bar must close beyond |
-| `InpRSIPeriod` | 7 | RSI period on the entry TF |
-| `InpRSIBuyLevel` / `InpRSISellLevel` | 30 / 70 | RSI levels the pullback must cross back through |
+| `InpRSIPeriod` | 14 | RSI period on the entry TF |
+| `InpRSIBuyLevel` / `InpRSISellLevel` | 40 / 60 | RSI level the pullback must reach (BUY: at/below, SELL: at/above) |
+| `InpPullbackBars` | 6 | How many recent closed bars that RSI dip may lie within |
 | `InpATRPeriod` | 14 | ATR period on the entry TF |
 | `InpSLATRMult` / `InpTPATRMult` | 2.0 / 1.0 | SL and TP distance as ATR multiples |
-| `InpMinSLPoints` / `InpMaxSLPoints` | 300 / 2500 | SL clamp; trade skipped above the max |
+| `InpMinSLPrice` / `InpMaxSLPrice` | 3.0 / 40.0 | SL clamp in price units ($); trade skipped above the max |
 | `InpUseBreakEven` | true | Enable break-even |
 | `InpBETriggerPercent` | 60 | % of the TP distance that triggers break-even |
-| `InpBELockPoints` | 30 | Points beyond entry the break-even SL is placed at |
+| `InpBELockPrice` | 0.30 | Distance ($) beyond entry the break-even SL is placed at |
 | `InpUseRiskPercent` / `InpRiskPercent` | true / 1.0 | Risk-based lot sizing, % of balance per trade |
 | `InpFixedLots` / `InpMaxLots` | 0.01 / 1.0 | Fixed lot (when risk sizing is off) and lot cap |
 | `InpMaxTradesPerDay` | 3 | Max entries per day |
 | `InpMaxLossesPerDay` | 1 | Stop for the day after this many losses |
 | `InpMaxDailyLossPercent` | 3.0 | Stop for the day at this closed loss, % of day-start balance |
-| `InpMaxSpreadPoints` | 40 | Max spread for a new entry |
+| `InpMaxSpreadPrice` | 0.60 | Max spread for a new entry, in price units ($) |
+| `InpDebugLog` | true | Log the no-trade reason once per entry-TF bar |
+| `InpSlippagePoints` | 50 | Max deviation for orders (points) |
 | `InpMagicNumber` | 202611 | Magic number |
 | Time filter | 09:00–20:00, Fri 14:00 | Server time; adjust to your broker's time zone |
 | News filter | High, 60 / 60 min | Blackout around high-impact XAU/USD events |
