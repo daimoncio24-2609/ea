@@ -114,3 +114,54 @@ None of this has been backtested per pair — treat both sets of defaults as a s
 ## Risk note
 
 This is a martingale-style averaging strategy: with `InpMaxAveragingOrders = 5`, a single basket can still accumulate meaningful exposure before it stops adding orders (raise this only after you've validated results, since it directly multiplies worst-case exposure). `InpLotMultiplier > 1.0` compounds that further within a single basket, since each level is both bigger *and* further from a favorable price than flat-lot averaging. `InpMaxFloatingLossPercent` (default 10% of balance per basket) is the hard stop that caps how deep that loss can go — size `InpLots`, `InpLotMultiplier`, the averaging distance, and this percentage together for your account balance. Because BUY and SELL baskets are independent, both sides can be open (hedged) at once on trend flips, so worst-case combined floating loss across both baskets is up to double the per-basket limit (roughly 20% of balance with the defaults) before both would be stopped out.
+
+---
+
+# Gold Single Entry EA (MQL5)
+
+`MQL5/Experts/Gold_Single_Entry_EA.mq5` — a separate, **single-entry** EA for **XAUUSD**, magic number `202611`. Unlike the ADX Trend Scalper above, it never averages and never uses a lot multiplier: at most **one** position is open at a time, and every position is opened with a broker-side SL and TP.
+
+## Strategy
+
+1. **H1 trend filter:** EMA(50) above EMA(200), last H1 close above EMA(50), ADX(14) ≥ 20 and DI+ > DI- → BUY only. Mirror image → SELL only. Otherwise no trade.
+2. **Pullback entry (M15 by default):** on each new bar, BUY when RSI(7) was below 30 on the previous bar and has just closed back above 30, the closed bar is bullish, and it closed above the M15 EMA(50) (the pullback held, it didn't turn into a reversal). SELL is the mirror (RSI back below 70, bearish bar, close below the EMA). Buying a dip *inside* an established trend is the main source of the win rate.
+3. **SL / TP from ATR(M15):** SL = ATR × 2.0, TP = ATR × 1.0. SL is clamped to `InpMinSLPoints` (TP scales with it to keep the ratio); if the ATR SL would be larger than `InpMaxSLPoints` the trade is skipped (market too wild).
+4. **Break-even:** once price has covered 60% of the way to TP, the SL moves to entry + 30 points. A trade that went our way and then reversed closes as a small win instead of a full loss.
+5. **Risk sizing:** lot = 1% of balance ÷ loss-per-lot at the SL (or a fixed lot). Note the lot is floored at the broker's minimum lot, so on a very small account the real risk can be above `InpRiskPercent`.
+6. **Daily limits:** max 3 entries per day, stop for the day after the first loss, and stop for the day once closed losses reach 3% of the day-start balance.
+7. **Time / news / spread filters:** 09:00–20:00 server time (Friday until 14:00), no new entry 60 min before/after high-impact XAU/USD news, max spread 40 points.
+8. The on-chart comment shows the H1 trend, why the EA is (not) trading right now, and the all-time win rate / net P/L of this magic number.
+
+## Why the win rate is high — and what that costs
+
+The win rate comes from three things: trading only *with* the H1 trend, a TP that is **half** the SL, and break-even. That is a deliberate trade-off, not a free lunch:
+
+- With TP = 1 × ATR and SL = 2 × ATR, one loss wipes out roughly **two** wins. The break-even win rate (before spread/commission) is about **67%**; spread pushes it closer to 70%. So an **80%+ win rate is the *minimum* for this setup to be meaningfully profitable**, not a guarantee of profit.
+- Raising `InpTPATRMult` lowers the win rate but each win pays more; lowering it raises the win rate but makes each loss hurt more. Judge it by **profit factor and expectancy** in the Strategy Tester, not by win rate alone.
+- None of these defaults have been backtested yet. Before going live: run the MT5 Strategy Tester on XAUUSD M15 with "Every tick based on real ticks" over at least 1–2 years, check win rate, profit factor (> 1.3) and max drawdown, then forward-test on demo for several weeks. Past results never guarantee future win rate.
+
+## Key inputs
+
+| Input | Default | Meaning |
+|---|---|---|
+| `InpEMAFastH1` / `InpEMASlowH1` | 50 / 200 | H1 trend EMAs |
+| `InpADXPeriodH1` / `InpADXMinH1` | 14 / 20 | H1 ADX period and minimum strength |
+| `InpEntryTimeframe` | M15 | Entry timeframe |
+| `InpEMAEntry` | 50 | EMA on the entry TF the pullback bar must close beyond |
+| `InpRSIPeriod` | 7 | RSI period on the entry TF |
+| `InpRSIBuyLevel` / `InpRSISellLevel` | 30 / 70 | RSI levels the pullback must cross back through |
+| `InpATRPeriod` | 14 | ATR period on the entry TF |
+| `InpSLATRMult` / `InpTPATRMult` | 2.0 / 1.0 | SL and TP distance as ATR multiples |
+| `InpMinSLPoints` / `InpMaxSLPoints` | 300 / 2500 | SL clamp; trade skipped above the max |
+| `InpUseBreakEven` | true | Enable break-even |
+| `InpBETriggerPercent` | 60 | % of the TP distance that triggers break-even |
+| `InpBELockPoints` | 30 | Points beyond entry the break-even SL is placed at |
+| `InpUseRiskPercent` / `InpRiskPercent` | true / 1.0 | Risk-based lot sizing, % of balance per trade |
+| `InpFixedLots` / `InpMaxLots` | 0.01 / 1.0 | Fixed lot (when risk sizing is off) and lot cap |
+| `InpMaxTradesPerDay` | 3 | Max entries per day |
+| `InpMaxLossesPerDay` | 1 | Stop for the day after this many losses |
+| `InpMaxDailyLossPercent` | 3.0 | Stop for the day at this closed loss, % of day-start balance |
+| `InpMaxSpreadPoints` | 40 | Max spread for a new entry |
+| `InpMagicNumber` | 202611 | Magic number |
+| Time filter | 09:00–20:00, Fri 14:00 | Server time; adjust to your broker's time zone |
+| News filter | High, 60 / 60 min | Blackout around high-impact XAU/USD events |
