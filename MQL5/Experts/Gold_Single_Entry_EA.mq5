@@ -93,6 +93,7 @@ datetime       g_lastEntryBarTime = 0;
 datetime       g_currentDayStart  = 0;
 double         g_dayStartBalance  = 0.0;
 string         g_lastStatus       = "";
+string         g_lastSkipped      = "";   // last signal a filter blocked, for the chart comment
 datetime       g_lastLogBarTime   = 0;
 bool           g_statsDirty       = true;   // re-read deal history on the next tick
 int            g_todayEntries = 0, g_todayLosses = 0;
@@ -495,11 +496,11 @@ double CalcLots(ENUM_ORDER_TYPE type, double price, double sl)
   }
 
 //+------------------------------------------------------------------+
-void TryOpen(ENUM_TREND signal)
+bool TryOpen(ENUM_TREND signal)
   {
    double atr[];
    if(CopyBuffer(hATR, 0, 1, 1, atr) <= 0 || atr[0] <= 0.0)
-      return;
+      return false;
 
    double slDist = atr[0] * InpSLATRMult;
    double tpDist = atr[0] * InpTPATRMult;
@@ -508,7 +509,7 @@ void TryOpen(ENUM_TREND signal)
    if(slDist > maxSL)
      {
       PrintFormat("Skip: ATR-based SL %.2f exceeds InpMaxSLPrice %.2f (market too volatile).", slDist, maxSL);
-      return;
+      return false;
      }
    if(slDist < minSL)
      {
@@ -521,7 +522,7 @@ void TryOpen(ENUM_TREND signal)
    if(tpDist <= stopsLevel || slDist <= stopsLevel)
      {
       PrintFormat("Skip: TP %.2f / SL %.2f inside broker stops level %.2f.", tpDist, slDist, stopsLevel);
-      return;
+      return false;
      }
 
    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
@@ -531,8 +532,9 @@ void TryOpen(ENUM_TREND signal)
       double sl  = NormalizeDouble(ask - slDist, digits);
       double tp  = NormalizeDouble(ask + tpDist, digits);
       double lots = CalcLots(ORDER_TYPE_BUY, ask, sl);
-      if(!trade.Buy(lots, _Symbol, ask, sl, tp, "Gold single entry BUY"))
-         PrintFormat("Buy failed: %d %s", trade.ResultRetcode(), trade.ResultRetcodeDescription());
+      if(trade.Buy(lots, _Symbol, ask, sl, tp, "Gold single entry BUY"))
+         return true;
+      PrintFormat("Buy failed: %d %s", trade.ResultRetcode(), trade.ResultRetcodeDescription());
      }
    else if(signal == TREND_SELL)
      {
@@ -540,11 +542,12 @@ void TryOpen(ENUM_TREND signal)
       double sl  = NormalizeDouble(bid + slDist, digits);
       double tp  = NormalizeDouble(bid - tpDist, digits);
       double lots = CalcLots(ORDER_TYPE_SELL, bid, sl);
-      if(!trade.Sell(lots, _Symbol, bid, sl, tp, "Gold single entry SELL"))
-         PrintFormat("Sell failed: %d %s", trade.ResultRetcode(), trade.ResultRetcodeDescription());
+      if(trade.Sell(lots, _Symbol, bid, sl, tp, "Gold single entry SELL"))
+         return true;
+      PrintFormat("Sell failed: %d %s", trade.ResultRetcode(), trade.ResultRetcodeDescription());
      }
+   return false;
   }
-
 //+------------------------------------------------------------------+
 //| Move SL to entry + InpBELockPrice once price has covered          |
 //| InpBETriggerPercent of the way to TP. Turns a lot of would-be     |
@@ -646,7 +649,8 @@ void OnTick()
       if(signal != TREND_NONE)
         {
          status = "signal " + (signal == TREND_BUY ? "BUY" : "SELL");
-         TryOpen(signal);
+         if(!TryOpen(signal))
+            status += " NOT opened - see Experts log";
         }
       else
          status = reason;
@@ -655,13 +659,31 @@ void OnTick()
    else
       status = g_lastStatus == "" ? status : g_lastStatus;
 
-   // One debug line per entry-TF bar, so the Experts log shows why nothing traded
+   // One debug line per entry-TF bar, so the Experts log shows why nothing traded.
+   // When a filter (hours, news, spread, daily limit) blocked evaluation, the
+   // signal is still checked here so a setup the filter threw away shows up as
+   // "SKIPPED" instead of silently never happening.
    datetime barTime = iTime(_Symbol, InpEntryTimeframe, 0);
    if(InpDebugLog && barTime != g_lastLogBarTime)
      {
       g_lastLogBarTime = barTime;
-      PrintFormat("[%s] H1 trend=%s | %s", TimeToString(TimeCurrent(), TIME_DATE | TIME_MINUTES),
-                  trend == TREND_BUY ? "BUY" : (trend == TREND_SELL ? "SELL" : "NONE"), status);
+      string trendStr = trend == TREND_BUY ? "BUY" : (trend == TREND_SELL ? "SELL" : "NONE");
+      bool blocked = (status == "outside trading hours" || status == "news blackout" ||
+                      StringFind(status, "spread too wide") == 0 || StringFind(status, "stopped for today") == 0);
+      string skipped = "";
+      if(blocked && trend != TREND_NONE)
+        {
+         string reason;
+         ENUM_TREND sig = GetPullbackSignal(trend, reason);
+         if(sig != TREND_NONE)
+           {
+            skipped = StringFormat(" | %s signal SKIPPED", sig == TREND_BUY ? "BUY" : "SELL");
+            g_lastSkipped = StringFormat("%s %s (%s)", sig == TREND_BUY ? "BUY" : "SELL",
+                                         TimeToString(TimeCurrent(), TIME_DATE | TIME_MINUTES), status);
+           }
+        }
+      PrintFormat("[%s] H1 trend=%s | %s%s", TimeToString(TimeCurrent(), TIME_DATE | TIME_MINUTES),
+                  trendStr, status, skipped);
      }
 
    double atr[];
@@ -671,9 +693,10 @@ void OnTick()
 
    Comment(StringFormat("Gold Single Entry EA\nH1 trend: %s\nStatus: %s\n"
                         "Spread: %.2f (max %.2f)  ATR SL: %.2f (max %.2f)\n"
+                        "Last skipped signal: %s\n"
                         "Trades: %d  Wins: %d  Losses: %d  Win rate: %.1f%%\nNet P/L: %.2f",
                         trend == TREND_BUY ? "BUY" : (trend == TREND_SELL ? "SELL" : "NONE"),
                         status, CurrentSpread(), InpMaxSpreadPrice, atrVal * InpSLATRMult, InpMaxSLPrice,
-                        total, g_allWins, g_allLosses, winRate, g_allNet));
+                        g_lastSkipped == "" ? "-" : g_lastSkipped, total, g_allWins, g_allLosses, winRate, g_allNet));
   }
 //+------------------------------------------------------------------+
