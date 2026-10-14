@@ -135,6 +135,17 @@ This is a martingale-style averaging strategy: with `InpMaxAveragingOrders = 5`,
 
 **Price units, not points:** spread, SL clamps and the break-even lock are in price units (USD for XAUUSD), not broker points. XAUUSD is quoted with 2 digits by some brokers and 3 by others, so a points limit sized for one is 10× off on the other — the first version's 40-point spread limit blocked every trade on 3-digit gold quotes. Orders also use the symbol's own filling mode (`SetTypeFillingBySymbol`), since many brokers reject the CTrade default (FOK) on gold.
 
+## Optimising in the Strategy Tester
+
+The defaults are a reasoned starting point, not tuned values — they have not been backtested. To find settings that actually reach ≥80% win rate on your broker's data:
+
+1. Strategy Tester: Expert `Gold_Single_Entry_EA`, symbol your XAUUSD, period **M15**, modelling **Every tick based on real ticks**, a date range of at least 6–12 months.
+2. Inputs tab → right click → **Load** → `MQL5/Presets/Gold_Single_Entry_EA_optimize.set` (copy it into your terminal's `MQL5/Presets` folder first). It marks the entry, SL/TP, break-even and trailing inputs for optimisation with sensible ranges.
+3. Optimisation: **Fast genetic based algorithm**, criterion **Custom max**. The EA's `OnTester()` score is 0 for any pass that loses money, has fewer than `InpOptMinTrades` (30) trades, or a win rate below `InpOptMinWinRate` (80%); among the rest it ranks by profit factor × √trades × (1 − drawdown). So the top results are profitable, ≥80% win rate, and based on enough trades to mean something.
+4. **Avoid curve-fitting:** optimise on e.g. Jan–Jun, then run the best 3–5 passes unchanged on Jul–Dec (Strategy Tester's *Forward* option does this automatically: set Forward = 1/3 or 1/2). Keep a set only if it still holds up on the forward period, then demo-test it.
+
+Two filters added for trade quality: `InpMaxTriggerBarATR` (default 1.5) skips a signal whose trigger bar is bigger than 1.5 × ATR — usually a news spike, where entering means chasing; and the Experts log warns when the broker's minimum lot makes the real risk per trade much larger than `InpRiskPercent` (common on small accounts with gold's wide ATR-based SL).
+
 ## Why the win rate is high — and what that costs
 
 The win rate comes from three things: trading only *with* the H1 trend, a TP that is **half** the SL, and break-even. That is a deliberate trade-off, not a free lunch:
@@ -154,6 +165,7 @@ The win rate comes from three things: trading only *with* the H1 trend, a TP tha
 | `InpRSIBuyLevel` / `InpRSISellLevel` | 45 / 55 | RSI level the pullback must reach (BUY: at/below, SELL: at/above) |
 | `InpRSITriggerLevel` | 50 | Entry fires when RSI crosses back over this level |
 | `InpPullbackBars` | 12 | How many recent closed bars the pullback may lie within |
+| `InpMaxTriggerBarATR` | 1.5 | Skip signals whose trigger bar range > ATR × this (0 = off) |
 | `InpATRPeriod` | 14 | ATR period on the entry TF |
 | `InpSLATRMult` / `InpTPATRMult` | 2.0 / 1.0 | SL and TP distance as ATR multiples |
 | `InpMinSLPrice` / `InpMaxSLPrice` | 3.0 / 40.0 | SL clamp in price units ($); trade skipped above the max |
@@ -174,5 +186,6 @@ The win rate comes from three things: trading only *with* the H1 trend, a TP tha
 | `InpDebugLog` | true | Log the no-trade reason once per entry-TF bar |
 | `InpSlippagePoints` | 50 | Max deviation for orders (points) |
 | `InpMagicNumber` | 202611 | Magic number |
+| `InpOptMinWinRate` / `InpOptMinTrades` | 80 / 30 | Minimum win rate and trade count for a pass to score in "Custom max" optimisation |
 | Time filter | 09:00–20:00, Fri 14:00 | Server time; adjust to your broker's time zone |
 | News filter | High, 60 / 60 min | Blackout around high-impact XAU/USD events |

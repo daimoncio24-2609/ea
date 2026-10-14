@@ -25,6 +25,7 @@ input double   InpRSIBuyLevel        = 45.0;    // BUY: RSI must have dipped to/
 input double   InpRSISellLevel       = 55.0;    // SELL: RSI must have risen to/above this during the pullback
 input double   InpRSITriggerLevel    = 50.0;    // Entry fires when RSI crosses back over this level (BUY: up, SELL: down)
 input int      InpPullbackBars       = 12;      // How many recent closed bars the pullback may lie within
+input double   InpMaxTriggerBarATR   = 1.5;     // Skip if the trigger bar's range > ATR * this (news spike / chasing); 0 = off
 
 //--- SL / TP
 input group "=== Stop Loss / Take Profit ==="
@@ -67,6 +68,11 @@ input double   InpMaxSpreadPrice     = 0.60;    // Max allowed spread, in price 
 input bool     InpDebugLog           = true;    // Print why no trade was opened, once per entry-TF bar
 input int      InpMagicNumber        = 202611;  // Magic number
 input int      InpSlippagePoints     = 50;      // Max deviation for orders (points)
+
+//--- Strategy Tester optimisation (only used by "Custom max" optimisation)
+input group "=== Optimisation (Strategy Tester) ==="
+input double   InpOptMinWinRate      = 80.0;    // Pass must reach this win rate (%) to score
+input int      InpOptMinTrades       = 30;      // Pass must have at least this many trades to score
 
 //--- Time filter
 input group "=== Time Filter (broker/server time) ==="
@@ -286,6 +292,25 @@ ENUM_TREND GetH1Trend()
   }
 
 //+------------------------------------------------------------------+
+//| A trigger bar much bigger than ATR is usually a news spike or a   |
+//| move that already happened; entering after it means chasing, and  |
+//| the ATR-sized TP/SL no longer fit the bar that set them up.       |
+//+------------------------------------------------------------------+
+bool TriggerBarTooBig(string &reason)
+  {
+   if(InpMaxTriggerBarATR <= 0.0)
+      return false;
+   double atr[];
+   if(CopyBuffer(hATR, 0, 1, 1, atr) <= 0 || atr[0] <= 0.0)
+      return false;
+   double range = iHigh(_Symbol, InpEntryTimeframe, 1) - iLow(_Symbol, InpEntryTimeframe, 1);
+   if(range <= atr[0] * InpMaxTriggerBarATR)
+      return false;
+   reason = StringFormat("trigger bar too big (%.2f > ATR %.2f x %.1f)", range, atr[0], InpMaxTriggerBarATR);
+   return true;
+  }
+
+//+------------------------------------------------------------------+
 //| Pullback trigger on the last closed entry-TF bar (bar 1):         |
 //| BUY  - within the last InpPullbackBars bars RSI dipped to/below   |
 //|        InpRSIBuyLevel (the pullback), and on bar 1 RSI crosses    |
@@ -330,6 +355,8 @@ ENUM_TREND GetPullbackSignal(ENUM_TREND trend, string &reason)
         { reason = StringFormat("BUY: pullback seen, waiting for RSI to cross up %.0f (now %.1f)", InpRSITriggerLevel, rsi[0]); return TREND_NONE; }
       if(close1 <= open1)
         { reason = "BUY: trigger bar not bullish"; return TREND_NONE; }
+      if(TriggerBarTooBig(reason))
+         return TREND_NONE;
       return TREND_BUY;
      }
 
@@ -339,6 +366,8 @@ ENUM_TREND GetPullbackSignal(ENUM_TREND trend, string &reason)
      { reason = StringFormat("SELL: pullback seen, waiting for RSI to cross down %.0f (now %.1f)", InpRSITriggerLevel, rsi[0]); return TREND_NONE; }
    if(close1 >= open1)
      { reason = "SELL: trigger bar not bearish"; return TREND_NONE; }
+   if(TriggerBarTooBig(reason))
+      return TREND_NONE;
    return TREND_SELL;
   }
 
@@ -499,8 +528,17 @@ double CalcLots(ENUM_ORDER_TYPE type, double price, double sl)
    if(!OrderCalcProfit(type, _Symbol, 1.0, price, sl, lossPerLot) || lossPerLot >= 0.0)
       return NormalizeLots(InpFixedLots);
 
-   double riskMoney = AccountInfoDouble(ACCOUNT_BALANCE) * InpRiskPercent / 100.0;
-   return NormalizeLots(riskMoney / MathAbs(lossPerLot));
+   double balance   = AccountInfoDouble(ACCOUNT_BALANCE);
+   double riskMoney = balance * InpRiskPercent / 100.0;
+   double lots      = NormalizeLots(riskMoney / MathAbs(lossPerLot));
+
+   // NormalizeLots floors at the broker's minimum lot; on a small account
+   // that can mean far more risk than InpRiskPercent - say so in the log.
+   double actualRiskPct = balance > 0.0 ? 100.0 * lots * MathAbs(lossPerLot) / balance : 0.0;
+   if(actualRiskPct > InpRiskPercent * 1.5)
+      PrintFormat("Warning: min lot %.2f risks %.1f%% of balance at this SL (target %.1f%%). Account is small for this SL size.",
+                  lots, actualRiskPct, InpRiskPercent);
+   return lots;
   }
 
 //+------------------------------------------------------------------+
@@ -768,5 +806,34 @@ void OnTick()
                         trend == TREND_BUY ? "BUY" : (trend == TREND_SELL ? "SELL" : "NONE"),
                         status, CurrentSpread(), InpMaxSpreadPrice, atrVal * InpSLATRMult, InpMaxSLPrice,
                         g_lastSkipped == "" ? "-" : g_lastSkipped, total, g_allWins, g_allLosses, winRate, g_allNet));
+  }
+//+------------------------------------------------------------------+
+
+//+------------------------------------------------------------------+
+//| Custom optimisation score (Strategy Tester -> Optimisation ->     |
+//| "Custom max"). A pass only scores if it is profitable, has at     |
+//| least InpOptMinTrades trades and a win rate >= InpOptMinWinRate;  |
+//| among those it prefers a high profit factor, more trades (more    |
+//| statistically meaningful) and a low drawdown. This keeps the      |
+//| optimiser from picking a 100%-win-rate pass with 3 trades, or a   |
+//| high-win-rate pass that still loses money.                        |
+//+------------------------------------------------------------------+
+double OnTester()
+  {
+   double trades = TesterStatistics(STAT_TRADES);
+   double wins   = TesterStatistics(STAT_PROFIT_TRADES);
+   double profit = TesterStatistics(STAT_PROFIT);
+   double pf     = TesterStatistics(STAT_PROFIT_FACTOR);
+   double ddPct  = TesterStatistics(STAT_EQUITY_DDREL_PERCENT);
+
+   if(trades < InpOptMinTrades || profit <= 0.0)
+      return 0.0;
+   double winRate = 100.0 * wins / trades;
+   if(winRate < InpOptMinWinRate)
+      return 0.0;
+   if(pf <= 0.0 || pf > 100.0)   // no losing trades at all reports PF as 0 or huge
+      pf = 10.0;
+
+   return pf * MathSqrt(trades) * (1.0 - MathMin(ddPct, 99.0) / 100.0);
   }
 //+------------------------------------------------------------------+
