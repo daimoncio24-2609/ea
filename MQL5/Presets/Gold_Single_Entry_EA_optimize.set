@@ -1,0 +1,28 @@
+; Gold_Single_Entry_EA - optimisation ranges for the MT5 Strategy Tester.
+; Load in Strategy Tester -> Inputs -> right click -> Load.
+; Format: name=value||start||step||stop||Y(optimise)/N(fixed)
+InpADXMinH1=15.0||10.0||5.0||25.0||Y
+InpUseH4Filter=true||false||0||true||Y
+InpUsePullback=true||false||0||true||Y
+InpUseBreakout=true||false||0||true||Y
+InpAsiaEndHour=9||8||1||11||Y
+InpBreakoutEndHour=13||12||1||16||Y
+InpBreakoutBuffer=0.5||0.0||0.5||1.5||Y
+InpMaxRangeATR=6.0||4.0||1.0||8.0||Y
+InpBreakoutTrendFilter=true||false||0||true||Y
+InpRSIBuyLevel=45.0||35.0||5.0||45.0||Y
+InpRSISellLevel=55.0||55.0||5.0||65.0||Y
+InpPullbackBars=12||6||3||18||Y
+InpSLATRMult=2.0||1.5||0.5||3.0||Y
+InpTPATRMult=1.0||0.6||0.2||1.4||Y
+InpUsePartialClose=true||false||0||true||Y
+InpPartialPercent=50.0||30.0||20.0||70.0||Y
+InpTP2ATRMult=2.5||1.5||0.5||3.5||Y
+InpBETriggerPercent=60.0||40.0||10.0||80.0||Y
+InpTrailStartATR=0.6||0.4||0.2||1.0||Y
+InpTrailATRMult=0.5||0.3||0.2||1.1||Y
+InpTrailRemoveTP=false||false||0||true||Y
+InpMaxTriggerBarATR=1.5||1.0||0.5||2.5||Y
+InpOptMinWinRate=80.0||80.0||0.0||80.0||N
+InpOptMinTrades=30||30||0||30||N
+InpDebugLog=false||false||0||true||N

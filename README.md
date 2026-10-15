@@ -114,3 +114,94 @@ None of this has been backtested per pair — treat both sets of defaults as a s
 ## Risk note
 
 This is a martingale-style averaging strategy: with `InpMaxAveragingOrders = 5`, a single basket can still accumulate meaningful exposure before it stops adding orders (raise this only after you've validated results, since it directly multiplies worst-case exposure). `InpLotMultiplier > 1.0` compounds that further within a single basket, since each level is both bigger *and* further from a favorable price than flat-lot averaging. `InpMaxFloatingLossPercent` (default 10% of balance per basket) is the hard stop that caps how deep that loss can go — size `InpLots`, `InpLotMultiplier`, the averaging distance, and this percentage together for your account balance. Because BUY and SELL baskets are independent, both sides can be open (hedged) at once on trend flips, so worst-case combined floating loss across both baskets is up to double the per-basket limit (roughly 20% of balance with the defaults) before both would be stopped out.
+
+---
+
+# Gold Single Entry EA (MQL5)
+
+`MQL5/Experts/Gold_Single_Entry_EA.mq5` — a separate, **single-entry** EA for **XAUUSD**, magic number `202611`. Unlike the ADX Trend Scalper above, it never averages and never uses a lot multiplier: at most **one** position is open at a time, and every position is opened with a broker-side SL and TP.
+
+## Strategy
+
+1. **H1 trend filter:** EMA(50) above EMA(200), last H1 close above EMA(200), and ADX(14) ≥ 15 → BUY only. Mirror image → SELL only. Otherwise no trade. (An earlier, stricter version also required the H1 close beyond EMA(50) and DI agreement; both flip during the very pullbacks this EA is waiting for, so the trend filter switched itself off right when a setup formed.)
+1b. **H4 confirmation (`InpUseH4Filter`, on by default):** the last H4 close must also be on the trend side of the H4 EMA(50). This drops H1 "trends" that are only a counter-move inside a bigger H4 trend — fewer trades, but the ones left run with both timeframes.
+2. **Pullback entry (M15 by default):** on each new bar, BUY when RSI(14) dipped to 45 or lower within the last 12 closed bars (the pullback) and then crosses back up over 50 on the last closed bar (the trend resumes), on a bullish bar. SELL is the mirror (RSI rose to 55+, then crosses back down under 50, bearish bar). Triggering on the cross gives one signal per pullback. Earlier versions also required that turn bar to close beyond the M15 EMA(50); right after a real pullback price is on the wrong side of that EMA, so the two conditions almost never lined up and the EA barely traded.
+2b. **Strategy 2 — Asian range breakout (`InpUseBreakout`, on by default):** gold usually trades in a tight range during the Asian session and starts its real move when London opens. The EA takes the high/low of today's M15 bars from `InpAsiaStartHour` to `InpAsiaEndHour` (default 01:00–09:00 **server time** — shift these to your broker's clock so the window ends at the London open). Between 09:00 and `InpBreakoutEndHour` (13:00) it enters when an M15 bar closes beyond the range by `InpBreakoutBuffer` ($0.50) for the first time, in the bar's direction, and — with `InpBreakoutTrendFilter` on — only in the H1 (+H4) trend direction. The range must be between 1× and 6× ATR(M15) wide (a tiny range is noise, a huge one has already spent the move). The SL goes at the range midpoint ± $0.50 (if price falls back to the middle of the range, the breakout failed); TP1/TP2, partial close, break-even and trailing work exactly as for pullback trades. At most **one breakout trade per day**, and it still counts toward `InpMaxTradesPerDay` and the other daily limits. Both strategies share the single-position rule: while one trade is open, neither opens another. Turn either off with `InpUsePullback` / `InpUseBreakout` to test them separately; orders are commented `GSE PB …` (pullback) or `GSE BO …` (breakout) so you can tell them apart in the history.
+3. **SL / TP from ATR(M15):** SL = ATR × 2.0, TP = ATR × 1.0. SL is clamped to `InpMinSLPrice` (TP scales with it to keep the ratio); if the ATR SL would be larger than `InpMaxSLPrice` the trade is skipped (market too wild).
+3b. **Partial close TP1 / TP2 (`InpUsePartialClose`, on by default):** the broker TP is set at TP2 = ATR × 2.5. When price reaches TP1 = ATR × 1.0 (the old TP), the EA closes 50% of the position, moves the runner's SL to break-even + $0.30 and lets it run to TP2 (with the trailing stop protecting it). The first half books the same profit as the plain setup, so a trade that reaches TP1 is a guaranteed win; the runner adds extra profit when the trend continues. If the lot is too small to split (e.g. 0.01), the whole position is closed at TP1 instead. TP1 is remembered in a terminal global variable, so it survives an EA or terminal restart.
+4. **Break-even:** once price has covered 60% of the way to TP, the SL moves to entry + $0.30. A trade that went our way and then reversed closes as a small win instead of a full loss.
+4b. **Dynamic trailing stop (ATR):** once profit reaches ATR(M15) × 0.6, the SL trails behind price at the *current* ATR(M15) × 0.5, moving only in the trade's favour and in steps of at least $0.20. Because the distance follows live ATR, it gives the trade more room when gold is volatile and tightens when it calms. The trailed SL is never placed worse than break-even + $0.30, so a trailed exit is always a win. By default the TP stays in place (the trail just protects profit on the way there); set `InpTrailRemoveTP = true` to drop the TP once trailing starts and let strong moves run — fewer trades reach a fixed target, but the winners can be much bigger.
+5. **Risk sizing:** lot = 1% of balance ÷ loss-per-lot at the SL (or a fixed lot). Note the lot is floored at the broker's minimum lot, so on a very small account the real risk can be above `InpRiskPercent`.
+6. **Daily limits:** max 3 entries per day, stop for the day after the first loss, and stop for the day once closed losses reach 3% of the day-start balance.
+7. **Time / news / spread filters:** 09:00–20:00 server time (Friday until 14:00), no new entry 60 min before/after high-impact XAU/USD news, max spread $0.60.
+8. **Win rate is counted per position**, not per deal: with partial close one trade has two exit deals, which would otherwise be double-counted. The on-chart stats, the daily loss limit and the optimisation score all use the per-position net result (including entry commission and swap).
+9. The on-chart comment shows the H1 trend, why the EA is (not) trading right now, the live spread and ATR SL against their limits, and the all-time win rate / net P/L of this magic number. With `InpDebugLog` on, the Experts tab gets one line per M15 bar saying why no trade was opened; if a valid signal appeared while the time/news/spread/daily-limit filter was blocking, that line ends in `SELL signal SKIPPED` (or BUY) and the chart shows it as "Last skipped signal". If a signal fires but the order isn't placed (SL too large, broker rejection), the status reads `NOT opened - see Experts log`.
+
+**Price units, not points:** spread, SL clamps and the break-even lock are in price units (USD for XAUUSD), not broker points. XAUUSD is quoted with 2 digits by some brokers and 3 by others, so a points limit sized for one is 10× off on the other — the first version's 40-point spread limit blocked every trade on 3-digit gold quotes. Orders also use the symbol's own filling mode (`SetTypeFillingBySymbol`), since many brokers reject the CTrade default (FOK) on gold.
+
+## Optimising in the Strategy Tester
+
+The defaults are a reasoned starting point, not tuned values — they have not been backtested. To find settings that actually reach ≥80% win rate on your broker's data:
+
+1. Strategy Tester: Expert `Gold_Single_Entry_EA`, symbol your XAUUSD, period **M15**, modelling **Every tick based on real ticks**, a date range of at least 6–12 months.
+2. Inputs tab → right click → **Load** → `MQL5/Presets/Gold_Single_Entry_EA_optimize.set` (copy it into your terminal's `MQL5/Presets` folder first). It marks the entry, SL/TP, break-even and trailing inputs for optimisation with sensible ranges.
+3. Optimisation: **Fast genetic based algorithm**, criterion **Custom max**. The EA's `OnTester()` score is 0 for any pass that loses money, has fewer than `InpOptMinTrades` (30) trades, or a win rate below `InpOptMinWinRate` (80%); among the rest it ranks by profit factor × √trades × (1 − drawdown). So the top results are profitable, ≥80% win rate, and based on enough trades to mean something.
+4. **Avoid curve-fitting:** optimise on e.g. Jan–Jun, then run the best 3–5 passes unchanged on Jul–Dec (Strategy Tester's *Forward* option does this automatically: set Forward = 1/3 or 1/2). Keep a set only if it still holds up on the forward period, then demo-test it.
+
+Two filters added for trade quality: `InpMaxTriggerBarATR` (default 1.5) skips a signal whose trigger bar is bigger than 1.5 × ATR — usually a news spike, where entering means chasing; and the Experts log warns when the broker's minimum lot makes the real risk per trade much larger than `InpRiskPercent` (common on small accounts with gold's wide ATR-based SL).
+
+## Why the win rate is high — and what that costs
+
+The win rate comes from three things: trading only *with* the H1 trend, a TP that is **half** the SL, and break-even. That is a deliberate trade-off, not a free lunch:
+
+- With TP = 1 × ATR and SL = 2 × ATR, one loss wipes out roughly **two** wins. The break-even win rate (before spread/commission) is about **67%**; spread pushes it closer to 70%. So an **80%+ win rate is the *minimum* for this setup to be meaningfully profitable**, not a guarantee of profit.
+- Raising `InpTPATRMult` lowers the win rate but each win pays more; lowering it raises the win rate but makes each loss hurt more. Judge it by **profit factor and expectancy** in the Strategy Tester, not by win rate alone.
+- None of these defaults have been backtested yet. Before going live: run the MT5 Strategy Tester on XAUUSD M15 with "Every tick based on real ticks" over at least 1–2 years, check win rate, profit factor (> 1.3) and max drawdown, then forward-test on demo for several weeks. Past results never guarantee future win rate.
+
+## Key inputs
+
+| Input | Default | Meaning |
+|---|---|---|
+| `InpEMAFastH1` / `InpEMASlowH1` | 50 / 200 | H1 trend EMAs |
+| `InpADXPeriodH1` / `InpADXMinH1` | 14 / 15 | H1 ADX period and minimum strength (0 = off) |
+| `InpUseH4Filter` / `InpEMAH4` | true / 50 | Require the last H4 close on the trend side of the H4 EMA |
+| `InpEntryTimeframe` | M15 | Entry timeframe |
+| `InpUsePullback` | true | Strategy 1: trend-pullback (RSI) entries |
+| `InpUseBreakout` | true | Strategy 2: Asian range breakout entries |
+| `InpAsiaStartHour` / `InpAsiaEndHour` | 1 / 9 | Asian range window (server time); its end is when breakouts may start |
+| `InpBreakoutEndHour` | 13 | No new breakout entries from this hour on (server time) |
+| `InpBreakoutBuffer` | 0.50 | Bar must close this far ($) beyond the range edge |
+| `InpMinRangeATR` / `InpMaxRangeATR` | 1.0 / 6.0 | Allowed range width, in ATR(entry TF) multiples |
+| `InpBreakoutTrendFilter` | true | Breakouts only in the H1 (+H4) trend direction |
+| `InpBreakoutSLBuffer` | 0.50 | Breakout SL = range midpoint ± this ($) |
+| `InpRSIPeriod` | 14 | RSI period on the entry TF |
+| `InpRSIBuyLevel` / `InpRSISellLevel` | 45 / 55 | RSI level the pullback must reach (BUY: at/below, SELL: at/above) |
+| `InpRSITriggerLevel` | 50 | Entry fires when RSI crosses back over this level |
+| `InpPullbackBars` | 12 | How many recent closed bars the pullback may lie within |
+| `InpMaxTriggerBarATR` | 1.5 | Skip signals whose trigger bar range > ATR × this (0 = off) |
+| `InpATRPeriod` | 14 | ATR period on the entry TF |
+| `InpSLATRMult` / `InpTPATRMult` | 2.0 / 1.0 | SL and TP distance as ATR multiples |
+| `InpUsePartialClose` | true | Close part of the position at TP1, let the rest run to TP2 |
+| `InpPartialPercent` | 50 | % of the volume closed at TP1 |
+| `InpTP2ATRMult` | 2.5 | TP2 (broker TP of the runner) = ATR × this; `InpTPATRMult` is then TP1 |
+| `InpMinSLPrice` / `InpMaxSLPrice` | 3.0 / 40.0 | SL clamp in price units ($); trade skipped above the max |
+| `InpUseBreakEven` | true | Enable break-even |
+| `InpBETriggerPercent` | 60 | % of the TP distance that triggers break-even |
+| `InpBELockPrice` | 0.30 | Distance ($) beyond entry the break-even SL is placed at |
+| `InpUseTrailing` | true | Enable the dynamic ATR trailing stop |
+| `InpTrailStartATR` | 0.6 | Start trailing once profit ≥ ATR × this |
+| `InpTrailATRMult` | 0.5 | Trailing distance behind price = current ATR × this |
+| `InpTrailStepPrice` | 0.20 | Minimum SL improvement ($) before it is moved again |
+| `InpTrailRemoveTP` | false | Drop the TP once trailing starts and let the trail take the exit |
+| `InpUseRiskPercent` / `InpRiskPercent` | true / 1.0 | Risk-based lot sizing, % of balance per trade |
+| `InpFixedLots` / `InpMaxLots` | 0.01 / 1.0 | Fixed lot (when risk sizing is off) and lot cap |
+| `InpMaxTradesPerDay` | 3 | Max entries per day |
+| `InpMaxLossesPerDay` | 1 | Stop for the day after this many losses |
+| `InpMaxDailyLossPercent` | 3.0 | Stop for the day at this closed loss, % of day-start balance |
+| `InpMaxSpreadPrice` | 0.60 | Max spread for a new entry, in price units ($) |
+| `InpDebugLog` | true | Log the no-trade reason once per entry-TF bar |
+| `InpSlippagePoints` | 50 | Max deviation for orders (points) |
+| `InpMagicNumber` | 202611 | Magic number |
+| `InpOptMinWinRate` / `InpOptMinTrades` | 80 / 30 | Minimum win rate and trade count for a pass to score in "Custom max" optimisation |
+| Time filter | 09:00–20:00, Fri 14:00 | Server time; adjust to your broker's time zone |
+| News filter | High, 60 / 60 min | Blackout around high-impact XAU/USD events |
