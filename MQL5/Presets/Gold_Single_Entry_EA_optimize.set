@@ -3,6 +3,13 @@
 ; Format: name=value||start||step||stop||Y(optimise)/N(fixed)
 InpADXMinH1=15.0||10.0||5.0||25.0||Y
 InpUseH4Filter=true||false||0||true||Y
+InpUsePullback=true||false||0||true||Y
+InpUseBreakout=true||false||0||true||Y
+InpAsiaEndHour=9||8||1||11||Y
+InpBreakoutEndHour=13||12||1||16||Y
+InpBreakoutBuffer=0.5||0.0||0.5||1.5||Y
+InpMaxRangeATR=6.0||4.0||1.0||8.0||Y
+InpBreakoutTrendFilter=true||false||0||true||Y
 InpRSIBuyLevel=45.0||35.0||5.0||45.0||Y
 InpRSISellLevel=55.0||55.0||5.0||65.0||Y
 InpPullbackBars=12||6||3||18||Y

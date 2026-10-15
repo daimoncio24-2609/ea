@@ -21,6 +21,7 @@ input int      InpEMAH4              = 50;      // H4 EMA period for that confir
 
 //--- Entry (pullback)
 input group "=== Entry (Pullback) ==="
+input bool     InpUsePullback        = true;    // Strategy 1: trend pullback (RSI) entries
 input ENUM_TIMEFRAMES InpEntryTimeframe = PERIOD_M15; // Entry timeframe
 input int      InpRSIPeriod          = 14;      // RSI period on entry TF
 input double   InpRSIBuyLevel        = 45.0;    // BUY: RSI must have dipped to/below this during the pullback
@@ -28,6 +29,18 @@ input double   InpRSISellLevel       = 55.0;    // SELL: RSI must have risen to/
 input double   InpRSITriggerLevel    = 50.0;    // Entry fires when RSI crosses back over this level (BUY: up, SELL: down)
 input int      InpPullbackBars       = 12;      // How many recent closed bars the pullback may lie within
 input double   InpMaxTriggerBarATR   = 1.5;     // Skip if the trigger bar's range > ATR * this (news spike / chasing); 0 = off
+
+//--- Strategy 2: Asian range breakout at London open
+input group "=== Strategy 2: Asian Range Breakout ==="
+input bool     InpUseBreakout        = true;    // Trade a breakout of the Asian-session range
+input int      InpAsiaStartHour      = 1;       // Asian range start hour (server time)
+input int      InpAsiaEndHour        = 9;       // Asian range end hour = breakout window start (server time)
+input int      InpBreakoutEndHour    = 13;      // No new breakout entries from this hour on (server time)
+input double   InpBreakoutBuffer     = 0.50;    // Bar must close this far ($) beyond the range edge
+input double   InpMinRangeATR        = 1.0;     // Skip if the range is narrower than ATR(entry TF) * this
+input double   InpMaxRangeATR        = 6.0;     // Skip if the range is wider than ATR(entry TF) * this
+input bool     InpBreakoutTrendFilter = true;   // Only break out in the H1 (+H4) trend direction
+input double   InpBreakoutSLBuffer   = 0.50;    // SL = range midpoint, plus this buffer ($)
 
 //--- SL / TP
 input group "=== Stop Loss / Take Profit ==="
@@ -400,6 +413,159 @@ ENUM_TREND GetPullbackSignal(ENUM_TREND trend, string &reason)
   }
 
 //+------------------------------------------------------------------+
+//| High/low of today's Asian session on the entry timeframe, from    |
+//| InpAsiaStartHour to InpAsiaEndHour (server time). Only available  |
+//| once that window has closed.                                      |
+//+------------------------------------------------------------------+
+bool GetAsianRange(double &hi, double &lo)
+  {
+   datetime day  = iTime(_Symbol, PERIOD_D1, 0);
+   if(day == 0)
+      return false;
+   datetime from = day + InpAsiaStartHour * 3600;
+   datetime to   = day + InpAsiaEndHour * 3600;
+   if(TimeCurrent() < to || to <= from)
+      return false;
+
+   MqlRates r[];
+   int n = CopyRates(_Symbol, InpEntryTimeframe, from, to - 1, r);
+   if(n < 4)
+      return false;
+   hi = -DBL_MAX;
+   lo = DBL_MAX;
+   for(int i = 0; i < n; i++)
+     {
+      hi = MathMax(hi, r[i].high);
+      lo = MathMin(lo, r[i].low);
+     }
+   return hi > lo;
+  }
+
+//+------------------------------------------------------------------+
+//| One breakout trade per day: true if a breakout position (order    |
+//| comment contains "BO") was already opened today.                  |
+//+------------------------------------------------------------------+
+bool BreakoutTradedToday()
+  {
+   if(!HistorySelect(iTime(_Symbol, PERIOD_D1, 0), TimeCurrent() + 60))
+      return false;
+   for(int i = HistoryDealsTotal() - 1; i >= 0; i--)
+     {
+      ulong deal = HistoryDealGetTicket(i);
+      if(deal == 0)
+         continue;
+      if(HistoryDealGetString(deal, DEAL_SYMBOL) == _Symbol &&
+         HistoryDealGetInteger(deal, DEAL_MAGIC) == InpMagicNumber &&
+         HistoryDealGetInteger(deal, DEAL_ENTRY) == DEAL_ENTRY_IN &&
+         StringFind(HistoryDealGetString(deal, DEAL_COMMENT), "BO") >= 0)
+         return true;
+     }
+   return false;
+  }
+
+//+------------------------------------------------------------------+
+//| Asian range breakout on the last closed entry-TF bar (bar 1):     |
+//| BUY  - bar 1 closes above range high + buffer, bar 2 did not (a   |
+//|        fresh break), bar 1 is bullish, inside the breakout window |
+//|        and (optionally) in the H1/H4 trend direction.             |
+//| SELL - mirror image.                                              |
+//| slPrice = range midpoint -/+ InpBreakoutSLBuffer: if price falls  |
+//| back to the middle of the range, the breakout has failed.         |
+//+------------------------------------------------------------------+
+ENUM_TREND GetBreakoutSignal(ENUM_TREND trend, string &reason, double &slPrice)
+  {
+   reason = "";
+   slPrice = 0.0;
+   if(!InpUseBreakout)
+      return TREND_NONE;
+
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   if(dt.hour < InpAsiaEndHour || dt.hour >= InpBreakoutEndHour)
+     { reason = "BO: outside breakout window"; return TREND_NONE; }
+   if(InpBreakoutTrendFilter && trend == TREND_NONE)
+     { reason = "BO: no trend"; return TREND_NONE; }
+
+   double hi, lo;
+   if(!GetAsianRange(hi, lo))
+     { reason = "BO: Asian range not available"; return TREND_NONE; }
+
+   double atr[];
+   if(CopyBuffer(hATR, 0, 1, 1, atr) <= 0 || atr[0] <= 0.0)
+     { reason = "BO: ATR not ready"; return TREND_NONE; }
+   double range = hi - lo;
+   if(range < atr[0] * InpMinRangeATR)
+     { reason = StringFormat("BO: range %.2f too narrow", range); return TREND_NONE; }
+   if(range > atr[0] * InpMaxRangeATR)
+     { reason = StringFormat("BO: range %.2f too wide", range); return TREND_NONE; }
+
+   double open1  = iOpen(_Symbol, InpEntryTimeframe, 1);
+   double close1 = iClose(_Symbol, InpEntryTimeframe, 1);
+   double close2 = iClose(_Symbol, InpEntryTimeframe, 2);
+   if(open1 <= 0.0 || close1 <= 0.0 || close2 <= 0.0)
+     { reason = "BO: no bar data"; return TREND_NONE; }
+
+   double upLevel = hi + InpBreakoutBuffer;
+   double dnLevel = lo - InpBreakoutBuffer;
+   double mid = (hi + lo) / 2.0;
+   ENUM_TREND sig = TREND_NONE;
+   if(close1 > upLevel && close2 <= upLevel && close1 > open1 &&
+      (!InpBreakoutTrendFilter || trend == TREND_BUY))
+     {
+      sig = TREND_BUY;
+      slPrice = mid - InpBreakoutSLBuffer;
+     }
+   else if(close1 < dnLevel && close2 >= dnLevel && close1 < open1 &&
+           (!InpBreakoutTrendFilter || trend == TREND_SELL))
+     {
+      sig = TREND_SELL;
+      slPrice = mid + InpBreakoutSLBuffer;
+     }
+
+   if(sig == TREND_NONE)
+     {
+      reason = StringFormat("BO: waiting for break of %.2f / %.2f", upLevel, dnLevel);
+      return TREND_NONE;
+     }
+   if(BreakoutTradedToday())
+     { reason = "BO: already traded today"; return TREND_NONE; }
+   return sig;
+  }
+
+//+------------------------------------------------------------------+
+//| Both strategies, pullback first. isBreakout/slPrice describe the  |
+//| signal that fired; reason combines both "why not" texts.          |
+//+------------------------------------------------------------------+
+ENUM_TREND GetEntrySignal(ENUM_TREND trend, string &reason, bool &isBreakout, double &slPrice)
+  {
+   isBreakout = false;
+   slPrice = 0.0;
+   string r1 = "", r2 = "";
+   if(InpUsePullback && trend != TREND_NONE)
+     {
+      ENUM_TREND sig = GetPullbackSignal(trend, r1);
+      if(sig != TREND_NONE)
+         return sig;
+     }
+   if(InpUseBreakout)
+     {
+      ENUM_TREND sig = GetBreakoutSignal(trend, r2, slPrice);
+      if(sig != TREND_NONE)
+        {
+         isBreakout = true;
+         return sig;
+        }
+     }
+   if(!InpUsePullback)
+      reason = r2;
+   else if(!InpUseBreakout || r2 == "")
+      reason = r1 == "" ? "no H1 trend" : r1;
+   else
+      reason = (r1 == "" ? "PB: no trend" : r1) + " | " + r2;
+   return TREND_NONE;
+  }
+
+//+------------------------------------------------------------------+
 bool IsNewEntryBar()
   {
    datetime t = iTime(_Symbol, InpEntryTimeframe, 0);
@@ -635,27 +801,39 @@ void StoreTP1(ulong positionId, double fillPrice, double signedDist, int digits)
   }
 
 //+------------------------------------------------------------------+
-bool TryOpen(ENUM_TREND signal)
+bool TryOpen(ENUM_TREND signal, double slPrice = 0.0, bool isBreakout = false)
   {
    double atr[];
    if(CopyBuffer(hATR, 0, 1, 1, atr) <= 0 || atr[0] <= 0.0)
       return false;
 
-   double slDist = atr[0] * InpSLATRMult;
+   // Breakout trades pass a structural SL price (range midpoint);
+   // pullback trades use the ATR-based distance.
+   double refPrice = (signal == TREND_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double slDist = (slPrice > 0.0) ? MathAbs(refPrice - slPrice) : atr[0] * InpSLATRMult;
+   if(slPrice > 0.0 && ((signal == TREND_BUY && slPrice >= refPrice) || (signal == TREND_SELL && slPrice <= refPrice)))
+     {
+      Print("Skip: breakout SL is on the wrong side of price (price already back in the range).");
+      return false;
+     }
    double tpDist = atr[0] * InpTPATRMult;
    double tp2Dist = atr[0] * InpTP2ATRMult;
    double minSL  = InpMinSLPrice;
    double maxSL  = InpMaxSLPrice;
    if(slDist > maxSL)
      {
-      PrintFormat("Skip: ATR-based SL %.2f exceeds InpMaxSLPrice %.2f (market too volatile).", slDist, maxSL);
+      PrintFormat("Skip: SL %.2f exceeds InpMaxSLPrice %.2f (market too volatile / range too wide).", slDist, maxSL);
       return false;
      }
    if(slDist < minSL)
      {
-      // keep the TP:SL ratio when the SL is clamped up
-      tpDist  *= minSL / slDist;
-      tp2Dist *= minSL / slDist;
+      // keep the TP:SL ratio when the SL is clamped up (ATR mode only;
+      // a structural SL just gets widened to the minimum)
+      if(slPrice <= 0.0)
+        {
+         tpDist  *= minSL / slDist;
+         tp2Dist *= minSL / slDist;
+        }
       slDist   = minSL;
      }
 
@@ -679,7 +857,7 @@ bool TryOpen(ENUM_TREND signal)
       double sl  = NormalizeDouble(ask - slDist, digits);
       double tp  = NormalizeDouble(ask + brokerTPDist, digits);
       double lots = CalcLots(ORDER_TYPE_BUY, ask, sl);
-      if(trade.Buy(lots, _Symbol, ask, sl, tp, "Gold single entry BUY"))
+      if(trade.Buy(lots, _Symbol, ask, sl, tp, isBreakout ? "GSE BO BUY" : "GSE PB BUY"))
         {
          if(partial)
             StoreTP1(trade.ResultOrder(), trade.ResultPrice() > 0.0 ? trade.ResultPrice() : ask, tpDist, digits);
@@ -693,7 +871,7 @@ bool TryOpen(ENUM_TREND signal)
       double sl  = NormalizeDouble(bid + slDist, digits);
       double tp  = NormalizeDouble(bid - brokerTPDist, digits);
       double lots = CalcLots(ORDER_TYPE_SELL, bid, sl);
-      if(trade.Sell(lots, _Symbol, bid, sl, tp, "Gold single entry SELL"))
+      if(trade.Sell(lots, _Symbol, bid, sl, tp, isBreakout ? "GSE BO SELL" : "GSE PB SELL"))
         {
          if(partial)
             StoreTP1(trade.ResultOrder(), trade.ResultPrice() > 0.0 ? trade.ResultPrice() : bid, -tpDist, digits);
@@ -952,16 +1130,19 @@ void OnTick()
       status = "news blackout";
    else if(!SpreadOK())
       status = StringFormat("spread too wide (%.2f > %.2f)", CurrentSpread(), InpMaxSpreadPrice);
-   else if(trend == TREND_NONE)
+   else if(trend == TREND_NONE && !(InpUseBreakout && !InpBreakoutTrendFilter))
       status = InpUseH4Filter ? "no trend (H1 + H4 not aligned)" : "no H1 trend";
    else if(IsNewEntryBar())
      {
       string reason;
-      ENUM_TREND signal = GetPullbackSignal(trend, reason);
+      bool isBreakout;
+      double slPrice;
+      ENUM_TREND signal = GetEntrySignal(trend, reason, isBreakout, slPrice);
       if(signal != TREND_NONE)
         {
-         status = "signal " + (signal == TREND_BUY ? "BUY" : "SELL");
-         if(!TryOpen(signal))
+         status = StringFormat("%s signal %s", isBreakout ? "Breakout" : "Pullback",
+                               signal == TREND_BUY ? "BUY" : "SELL");
+         if(!TryOpen(signal, slPrice, isBreakout))
             status += " NOT opened - see Experts log";
         }
       else
@@ -983,10 +1164,12 @@ void OnTick()
       bool blocked = (status == "outside trading hours" || status == "news blackout" ||
                       StringFind(status, "spread too wide") == 0 || StringFind(status, "stopped for today") == 0);
       string skipped = "";
-      if(blocked && trend != TREND_NONE)
+      if(blocked)
         {
          string reason;
-         ENUM_TREND sig = GetPullbackSignal(trend, reason);
+         bool isBo;
+         double slP;
+         ENUM_TREND sig = GetEntrySignal(trend, reason, isBo, slP);
          if(sig != TREND_NONE)
            {
             skipped = StringFormat(" | %s signal SKIPPED", sig == TREND_BUY ? "BUY" : "SELL");
