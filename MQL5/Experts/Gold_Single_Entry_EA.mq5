@@ -16,6 +16,8 @@ input int      InpEMAFastH1          = 50;      // Fast EMA period on H1
 input int      InpEMASlowH1          = 200;     // Slow EMA period on H1
 input int      InpADXPeriodH1        = 14;      // ADX period on H1
 input double   InpADXMinH1           = 15.0;    // Min. ADX on H1 to accept a trend (0 = off)
+input bool     InpUseH4Filter        = true;    // Also require the last H4 close on the trend side of the H4 EMA
+input int      InpEMAH4              = 50;      // H4 EMA period for that confirmation
 
 //--- Entry (pullback)
 input group "=== Entry (Pullback) ==="
@@ -31,9 +33,15 @@ input double   InpMaxTriggerBarATR   = 1.5;     // Skip if the trigger bar's ran
 input group "=== Stop Loss / Take Profit ==="
 input int      InpATRPeriod          = 14;      // ATR period on entry TF
 input double   InpSLATRMult          = 2.0;     // SL distance = ATR(entry TF) * this
-input double   InpTPATRMult          = 1.0;     // TP distance = ATR(entry TF) * this
+input double   InpTPATRMult          = 1.0;     // TP distance = ATR(entry TF) * this (TP1 when partial close is on)
 input double   InpMinSLPrice         = 3.0;     // Lower clamp for SL distance, in price units ($ for XAUUSD)
 input double   InpMaxSLPrice         = 40.0;    // Skip the trade if the ATR SL is bigger than this, in price units ($)
+
+//--- Partial close (TP1 / TP2)
+input group "=== Partial Close (TP1 / TP2) ==="
+input bool     InpUsePartialClose    = true;    // Close part of the position at TP1, let the rest run to TP2
+input double   InpPartialPercent     = 50.0;    // % of the volume closed at TP1
+input double   InpTP2ATRMult         = 2.5;     // TP2 (broker TP of the runner) = ATR(entry TF) * this
 
 //--- Break-even
 input group "=== Break-even ==="
@@ -103,6 +111,7 @@ int            hEMASlowH1 = INVALID_HANDLE;
 int            hADX_H1    = INVALID_HANDLE;
 int            hRSI       = INVALID_HANDLE;
 int            hATR       = INVALID_HANDLE;
+int            hEMAH4     = INVALID_HANDLE;
 datetime       g_lastEntryBarTime = 0;
 datetime       g_currentDayStart  = 0;
 double         g_dayStartBalance  = 0.0;
@@ -136,9 +145,10 @@ int OnInit()
    hADX_H1    = iADX(_Symbol, PERIOD_H1, InpADXPeriodH1);
    hRSI       = iRSI(_Symbol, InpEntryTimeframe, InpRSIPeriod, PRICE_CLOSE);
    hATR       = iATR(_Symbol, InpEntryTimeframe, InpATRPeriod);
+   hEMAH4     = iMA(_Symbol, PERIOD_H4, InpEMAH4, 0, MODE_EMA, PRICE_CLOSE);
 
    if(hEMAFastH1 == INVALID_HANDLE || hEMASlowH1 == INVALID_HANDLE || hADX_H1 == INVALID_HANDLE ||
-      hRSI == INVALID_HANDLE || hATR == INVALID_HANDLE)
+      hRSI == INVALID_HANDLE || hATR == INVALID_HANDLE || hEMAH4 == INVALID_HANDLE)
      {
       Print("Failed to create indicator handle(s).");
       return(INIT_FAILED);
@@ -146,6 +156,8 @@ int OnInit()
 
    if(InpTPATRMult >= InpSLATRMult)
       Print("Note: TP >= SL. Win rate will be lower than with the default TP < SL setup.");
+   if(InpUsePartialClose && InpTP2ATRMult <= InpTPATRMult)
+      Print("Note: InpTP2ATRMult <= InpTPATRMult, so the runner has no room beyond TP1.");
 
    return(INIT_SUCCEEDED);
   }
@@ -158,6 +170,7 @@ void OnDeinit(const int reason)
    if(hADX_H1    != INVALID_HANDLE) IndicatorRelease(hADX_H1);
    if(hRSI       != INVALID_HANDLE) IndicatorRelease(hRSI);
    if(hATR       != INVALID_HANDLE) IndicatorRelease(hATR);
+   if(hEMAH4     != INVALID_HANDLE) IndicatorRelease(hEMAH4);
    Comment("");
   }
 
@@ -284,11 +297,26 @@ ENUM_TREND GetH1Trend()
    if(closeH1 <= 0.0 || adx[0] < InpADXMinH1)
       return TREND_NONE;
 
+   ENUM_TREND trend = TREND_NONE;
    if(emaFast[0] > emaSlow[0] && closeH1 > emaSlow[0])
-      return TREND_BUY;
-   if(emaFast[0] < emaSlow[0] && closeH1 < emaSlow[0])
-      return TREND_SELL;
-   return TREND_NONE;
+      trend = TREND_BUY;
+   else if(emaFast[0] < emaSlow[0] && closeH1 < emaSlow[0])
+      trend = TREND_SELL;
+
+   // Higher-timeframe confirmation: only trade H1 pullbacks that also run
+   // with the H4 picture, skipping counter-moves inside a bigger H4 trend.
+   if(trend != TREND_NONE && InpUseH4Filter)
+     {
+      double emaH4[];
+      double closeH4 = iClose(_Symbol, PERIOD_H4, 1);
+      if(CopyBuffer(hEMAH4, 0, 1, 1, emaH4) <= 0 || closeH4 <= 0.0)
+         return TREND_NONE;
+      if(trend == TREND_BUY && closeH4 <= emaH4[0])
+         return TREND_NONE;
+      if(trend == TREND_SELL && closeH4 >= emaH4[0])
+         return TREND_NONE;
+     }
+   return trend;
   }
 
 //+------------------------------------------------------------------+
@@ -399,18 +427,40 @@ bool HasOpenPosition()
   }
 
 //+------------------------------------------------------------------+
-//| Today's entries, closed losing trades and closed net P/L for      |
-//| this symbol/magic, from the deal history.                         |
+//| True while a position with this identifier is still open.         |
 //+------------------------------------------------------------------+
-void GetTodayStats(int &entries, int &losses, double &netProfit)
+bool IsPositionOpen(ulong positionId)
   {
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket != 0 && PositionSelectByTicket(ticket) &&
+         (ulong)PositionGetInteger(POSITION_IDENTIFIER) == positionId)
+         return true;
+     }
+   return false;
+  }
+
+//+------------------------------------------------------------------+
+//| Net result of every *fully closed* position of this symbol/magic  |
+//| with deals since 'from' (entry commission, partial closes, swap   |
+//| all included), plus the number of entries since 'from'. Win rate  |
+//| is counted per position, not per deal: with partial close one     |
+//| trade produces two exit deals, and counting deals would double-   |
+//| count it.                                                         |
+//+------------------------------------------------------------------+
+void CollectClosedPositions(datetime from, double &nets[], int &entries)
+  {
+   ArrayResize(nets, 0);
    entries = 0;
-   losses = 0;
-   netProfit = 0.0;
-   if(!HistorySelect(g_currentDayStart, TimeCurrent() + 60))
+   if(!HistorySelect(from, TimeCurrent() + 60))
       return;
 
-   for(int i = HistoryDealsTotal() - 1; i >= 0; i--)
+   ulong  ids[];
+   double sums[];
+   bool   hasOut[];
+   int total = HistoryDealsTotal();
+   for(int i = 0; i < total; i++)
      {
       ulong deal = HistoryDealGetTicket(i);
       if(deal == 0)
@@ -423,49 +473,73 @@ void GetTodayStats(int &entries, int &losses, double &netProfit)
       long entry = HistoryDealGetInteger(deal, DEAL_ENTRY);
       if(entry == DEAL_ENTRY_IN)
          entries++;
-      else if(entry == DEAL_ENTRY_OUT || entry == DEAL_ENTRY_OUT_BY)
+
+      ulong pid = (ulong)HistoryDealGetInteger(deal, DEAL_POSITION_ID);
+      int k = -1;
+      for(int j = 0; j < ArraySize(ids); j++)
+         if(ids[j] == pid) { k = j; break; }
+      if(k < 0)
         {
-         double p = HistoryDealGetDouble(deal, DEAL_PROFIT) +
-                    HistoryDealGetDouble(deal, DEAL_SWAP) +
-                    HistoryDealGetDouble(deal, DEAL_COMMISSION);
-         netProfit += p;
-         if(p < 0.0)
-            losses++;
+         k = ArraySize(ids);
+         ArrayResize(ids, k + 1);
+         ArrayResize(sums, k + 1);
+         ArrayResize(hasOut, k + 1);
+         ids[k] = pid;
+         sums[k] = 0.0;
+         hasOut[k] = false;
         }
+      sums[k] += HistoryDealGetDouble(deal, DEAL_PROFIT) +
+                 HistoryDealGetDouble(deal, DEAL_SWAP) +
+                 HistoryDealGetDouble(deal, DEAL_COMMISSION);
+      if(entry == DEAL_ENTRY_OUT || entry == DEAL_ENTRY_OUT_BY)
+         hasOut[k] = true;
+     }
+
+   for(int k = 0; k < ArraySize(ids); k++)
+     {
+      if(!hasOut[k] || IsPositionOpen(ids[k]))
+         continue;
+      int n = ArraySize(nets);
+      ArrayResize(nets, n + 1);
+      nets[n] = sums[k];
      }
   }
 
 //+------------------------------------------------------------------+
-//| All-time win/loss count for this symbol/magic (for the on-chart   |
-//| comment). A trade closed at break-even + InpBELockPrice counts    |
-//| as a (small) win, since its net result is positive.               |
+//| Today's entries, closed losing positions and closed net P/L.      |
+//+------------------------------------------------------------------+
+void GetTodayStats(int &entries, int &losses, double &netProfit)
+  {
+   double nets[];
+   CollectClosedPositions(g_currentDayStart, nets, entries);
+   losses = 0;
+   netProfit = 0.0;
+   for(int i = 0; i < ArraySize(nets); i++)
+     {
+      netProfit += nets[i];
+      if(nets[i] < 0.0)
+         losses++;
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| All-time win/loss count per closed position (for the on-chart     |
+//| comment and OnTester). A position closed at break-even + lock or  |
+//| with a profitable partial close counts as a win if its total net  |
+//| result is positive.                                               |
 //+------------------------------------------------------------------+
 void GetAllTimeStats(int &wins, int &losses, double &netProfit)
   {
+   double nets[];
+   int entries;
+   CollectClosedPositions(0, nets, entries);
    wins = 0;
    losses = 0;
    netProfit = 0.0;
-   if(!HistorySelect(0, TimeCurrent() + 60))
-      return;
-
-   for(int i = HistoryDealsTotal() - 1; i >= 0; i--)
+   for(int i = 0; i < ArraySize(nets); i++)
      {
-      ulong deal = HistoryDealGetTicket(i);
-      if(deal == 0)
-         continue;
-      if(HistoryDealGetString(deal, DEAL_SYMBOL) != _Symbol)
-         continue;
-      if(HistoryDealGetInteger(deal, DEAL_MAGIC) != InpMagicNumber)
-         continue;
-      long entry = HistoryDealGetInteger(deal, DEAL_ENTRY);
-      if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_OUT_BY)
-         continue;
-
-      double p = HistoryDealGetDouble(deal, DEAL_PROFIT) +
-                 HistoryDealGetDouble(deal, DEAL_SWAP) +
-                 HistoryDealGetDouble(deal, DEAL_COMMISSION);
-      netProfit += p;
-      if(p > 0.0)
+      netProfit += nets[i];
+      if(nets[i] > 0.0)
          wins++;
       else
          losses++;
@@ -542,6 +616,25 @@ double CalcLots(ENUM_ORDER_TYPE type, double price, double sl)
   }
 
 //+------------------------------------------------------------------+
+//| Terminal global variable holding a position's TP1 price. Exists   |
+//| only until TP1 has been taken.                                    |
+//+------------------------------------------------------------------+
+string TP1VarName(ulong positionId)
+  {
+   return StringFormat("GSE_%d_%I64u_TP1", InpMagicNumber, positionId);
+  }
+
+//+------------------------------------------------------------------+
+//| Remember TP1 = fill price + signedDist for a new position.        |
+//+------------------------------------------------------------------+
+void StoreTP1(ulong positionId, double fillPrice, double signedDist, int digits)
+  {
+   if(positionId == 0)
+      return;
+   GlobalVariableSet(TP1VarName(positionId), NormalizeDouble(fillPrice + signedDist, digits));
+  }
+
+//+------------------------------------------------------------------+
 bool TryOpen(ENUM_TREND signal)
   {
    double atr[];
@@ -550,6 +643,7 @@ bool TryOpen(ENUM_TREND signal)
 
    double slDist = atr[0] * InpSLATRMult;
    double tpDist = atr[0] * InpTPATRMult;
+   double tp2Dist = atr[0] * InpTP2ATRMult;
    double minSL  = InpMinSLPrice;
    double maxSL  = InpMaxSLPrice;
    if(slDist > maxSL)
@@ -560,8 +654,9 @@ bool TryOpen(ENUM_TREND signal)
    if(slDist < minSL)
      {
       // keep the TP:SL ratio when the SL is clamped up
-      tpDist *= minSL / slDist;
-      slDist  = minSL;
+      tpDist  *= minSL / slDist;
+      tp2Dist *= minSL / slDist;
+      slDist   = minSL;
      }
 
    double stopsLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
@@ -571,29 +666,131 @@ bool TryOpen(ENUM_TREND signal)
       return false;
      }
 
+   // With partial close the broker TP is TP2 (for the runner); TP1 is
+   // handled by the EA and remembered in a terminal global variable so it
+   // survives an EA/terminal restart.
+   bool partial = InpUsePartialClose && tp2Dist > tpDist;
+   double brokerTPDist = partial ? tp2Dist : tpDist;
+
    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    if(signal == TREND_BUY)
      {
       double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
       double sl  = NormalizeDouble(ask - slDist, digits);
-      double tp  = NormalizeDouble(ask + tpDist, digits);
+      double tp  = NormalizeDouble(ask + brokerTPDist, digits);
       double lots = CalcLots(ORDER_TYPE_BUY, ask, sl);
       if(trade.Buy(lots, _Symbol, ask, sl, tp, "Gold single entry BUY"))
+        {
+         if(partial)
+            StoreTP1(trade.ResultOrder(), trade.ResultPrice() > 0.0 ? trade.ResultPrice() : ask, tpDist, digits);
          return true;
+        }
       PrintFormat("Buy failed: %d %s", trade.ResultRetcode(), trade.ResultRetcodeDescription());
      }
    else if(signal == TREND_SELL)
      {
       double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
       double sl  = NormalizeDouble(bid + slDist, digits);
-      double tp  = NormalizeDouble(bid - tpDist, digits);
+      double tp  = NormalizeDouble(bid - brokerTPDist, digits);
       double lots = CalcLots(ORDER_TYPE_SELL, bid, sl);
       if(trade.Sell(lots, _Symbol, bid, sl, tp, "Gold single entry SELL"))
+        {
+         if(partial)
+            StoreTP1(trade.ResultOrder(), trade.ResultPrice() > 0.0 ? trade.ResultPrice() : bid, -tpDist, digits);
          return true;
+        }
       PrintFormat("Sell failed: %d %s", trade.ResultRetcode(), trade.ResultRetcodeDescription());
      }
    return false;
   }
+//+------------------------------------------------------------------+
+//| Partial close at TP1: close InpPartialPercent of the volume, move |
+//| the runner's SL to break-even + lock, and let it run to TP2 (with |
+//| the trailing stop). If the volume is too small to split (e.g.     |
+//| 0.01 lot), the whole position is closed at TP1 instead, so the    |
+//| trade still behaves like the plain TP1 setup.                     |
+//+------------------------------------------------------------------+
+void ManagePartialClose()
+  {
+   if(!InpUsePartialClose)
+      return;
+
+   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   double minLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double stepLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   if(stepLot <= 0.0)
+      stepLot = 0.01;
+   double stopsLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket))
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol ||
+         PositionGetInteger(POSITION_MAGIC) != InpMagicNumber)
+         continue;
+
+      string name = TP1VarName((ulong)PositionGetInteger(POSITION_IDENTIFIER));
+      if(!GlobalVariableCheck(name))
+         continue;
+      double tp1 = GlobalVariableGet(name);
+      bool isBuy = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+      double price = isBuy ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      if(isBuy ? price < tp1 : price > tp1)
+         continue;
+
+      double volume    = PositionGetDouble(POSITION_VOLUME);
+      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      double tp        = PositionGetDouble(POSITION_TP);
+      double closeVol  = MathFloor(volume * InpPartialPercent / 100.0 / stepLot) * stepLot;
+      closeVol = NormalizeDouble(closeVol, 2);
+
+      if(closeVol < minLot || volume - closeVol < minLot - 1e-8)
+        {
+         // Can't split this volume: take the whole trade at TP1.
+         if(trade.PositionClose(ticket))
+            GlobalVariableDel(name);
+         continue;
+        }
+
+      if(!trade.PositionClosePartial(ticket, closeVol))
+        {
+         PrintFormat("Partial close failed: %d %s", trade.ResultRetcode(), trade.ResultRetcodeDescription());
+         continue;
+        }
+      GlobalVariableDel(name);
+
+      // Protect the runner: SL to break-even + lock (never loosen it).
+      if(!PositionSelectByTicket(ticket))
+         continue;
+      double sl = PositionGetDouble(POSITION_SL);
+      double beSL = NormalizeDouble(isBuy ? openPrice + InpBELockPrice : openPrice - InpBELockPrice, digits);
+      bool better = isBuy ? (sl < beSL || sl == 0.0) : (sl > beSL || sl == 0.0);
+      bool legal  = isBuy ? (price - beSL > stopsLevel) : (beSL - price > stopsLevel);
+      if(better && legal)
+         trade.PositionModify(ticket, beSL, tp);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Remove TP1 variables whose position no longer exists (closed by   |
+//| SL/TP before reaching TP1).                                       |
+//+------------------------------------------------------------------+
+void CleanupTP1Vars()
+  {
+   string prefix = StringFormat("GSE_%d_", InpMagicNumber);
+   for(int i = GlobalVariablesTotal() - 1; i >= 0; i--)
+     {
+      string name = GlobalVariableName(i);
+      if(StringFind(name, prefix) != 0 || StringFind(name, "_TP1") < 0)
+         continue;
+      string idStr = StringSubstr(name, StringLen(prefix), StringLen(name) - StringLen(prefix) - 4);
+      if(!IsPositionOpen((ulong)StringToInteger(idStr)))
+         GlobalVariableDel(name);
+     }
+  }
+
 //+------------------------------------------------------------------+
 //| Move SL to entry + InpBELockPrice once price has covered          |
 //| InpBETriggerPercent of the way to TP. Turns a lot of would-be     |
@@ -619,10 +816,15 @@ void ManageBreakEven()
       double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
       double sl = PositionGetDouble(POSITION_SL);
       double tp = PositionGetDouble(POSITION_TP);
-      if(tp <= 0.0)
+
+      // While TP1 is still pending, break-even is measured against TP1
+      // (the broker TP is then the far-away TP2).
+      string tp1Name = TP1VarName((ulong)PositionGetInteger(POSITION_IDENTIFIER));
+      double target = GlobalVariableCheck(tp1Name) ? GlobalVariableGet(tp1Name) : tp;
+      if(target <= 0.0)
          continue;
 
-      double tpDist = MathAbs(tp - openPrice);
+      double tpDist = MathAbs(target - openPrice);
       double trigger = tpDist * InpBETriggerPercent / 100.0;
       double lock = InpBELockPrice;
 
@@ -720,6 +922,7 @@ void RefreshStats()
       return;
    GetTodayStats(g_todayEntries, g_todayLosses, g_todayNet);
    GetAllTimeStats(g_allWins, g_allLosses, g_allNet);
+   CleanupTP1Vars();
    g_statsDirty = false;
   }
 
@@ -728,6 +931,7 @@ void OnTick()
   {
    UpdateDayStart();
    RefreshStats();
+   ManagePartialClose();
    ManageBreakEven();
    ManageTrailingStop();
 
@@ -749,7 +953,7 @@ void OnTick()
    else if(!SpreadOK())
       status = StringFormat("spread too wide (%.2f > %.2f)", CurrentSpread(), InpMaxSpreadPrice);
    else if(trend == TREND_NONE)
-      status = "no H1 trend";
+      status = InpUseH4Filter ? "no trend (H1 + H4 not aligned)" : "no H1 trend";
    else if(IsNewEntryBar())
      {
       string reason;
@@ -820,8 +1024,13 @@ void OnTick()
 //+------------------------------------------------------------------+
 double OnTester()
   {
-   double trades = TesterStatistics(STAT_TRADES);
-   double wins   = TesterStatistics(STAT_PROFIT_TRADES);
+   // Win rate per position (a partial close makes two exit deals per
+   // trade, so the tester's deal-based STAT_TRADES would double-count).
+   int w, l;
+   double net;
+   GetAllTimeStats(w, l, net);
+   double trades = w + l;
+   double wins   = w;
    double profit = TesterStatistics(STAT_PROFIT);
    double pf     = TesterStatistics(STAT_PROFIT_FACTOR);
    double ddPct  = TesterStatistics(STAT_EQUITY_DDREL_PERCENT);

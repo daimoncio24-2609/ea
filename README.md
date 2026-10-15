@@ -124,14 +124,17 @@ This is a martingale-style averaging strategy: with `InpMaxAveragingOrders = 5`,
 ## Strategy
 
 1. **H1 trend filter:** EMA(50) above EMA(200), last H1 close above EMA(200), and ADX(14) ≥ 15 → BUY only. Mirror image → SELL only. Otherwise no trade. (An earlier, stricter version also required the H1 close beyond EMA(50) and DI agreement; both flip during the very pullbacks this EA is waiting for, so the trend filter switched itself off right when a setup formed.)
+1b. **H4 confirmation (`InpUseH4Filter`, on by default):** the last H4 close must also be on the trend side of the H4 EMA(50). This drops H1 "trends" that are only a counter-move inside a bigger H4 trend — fewer trades, but the ones left run with both timeframes.
 2. **Pullback entry (M15 by default):** on each new bar, BUY when RSI(14) dipped to 45 or lower within the last 12 closed bars (the pullback) and then crosses back up over 50 on the last closed bar (the trend resumes), on a bullish bar. SELL is the mirror (RSI rose to 55+, then crosses back down under 50, bearish bar). Triggering on the cross gives one signal per pullback. Earlier versions also required that turn bar to close beyond the M15 EMA(50); right after a real pullback price is on the wrong side of that EMA, so the two conditions almost never lined up and the EA barely traded.
 3. **SL / TP from ATR(M15):** SL = ATR × 2.0, TP = ATR × 1.0. SL is clamped to `InpMinSLPrice` (TP scales with it to keep the ratio); if the ATR SL would be larger than `InpMaxSLPrice` the trade is skipped (market too wild).
+3b. **Partial close TP1 / TP2 (`InpUsePartialClose`, on by default):** the broker TP is set at TP2 = ATR × 2.5. When price reaches TP1 = ATR × 1.0 (the old TP), the EA closes 50% of the position, moves the runner's SL to break-even + $0.30 and lets it run to TP2 (with the trailing stop protecting it). The first half books the same profit as the plain setup, so a trade that reaches TP1 is a guaranteed win; the runner adds extra profit when the trend continues. If the lot is too small to split (e.g. 0.01), the whole position is closed at TP1 instead. TP1 is remembered in a terminal global variable, so it survives an EA or terminal restart.
 4. **Break-even:** once price has covered 60% of the way to TP, the SL moves to entry + $0.30. A trade that went our way and then reversed closes as a small win instead of a full loss.
 4b. **Dynamic trailing stop (ATR):** once profit reaches ATR(M15) × 0.6, the SL trails behind price at the *current* ATR(M15) × 0.5, moving only in the trade's favour and in steps of at least $0.20. Because the distance follows live ATR, it gives the trade more room when gold is volatile and tightens when it calms. The trailed SL is never placed worse than break-even + $0.30, so a trailed exit is always a win. By default the TP stays in place (the trail just protects profit on the way there); set `InpTrailRemoveTP = true` to drop the TP once trailing starts and let strong moves run — fewer trades reach a fixed target, but the winners can be much bigger.
 5. **Risk sizing:** lot = 1% of balance ÷ loss-per-lot at the SL (or a fixed lot). Note the lot is floored at the broker's minimum lot, so on a very small account the real risk can be above `InpRiskPercent`.
 6. **Daily limits:** max 3 entries per day, stop for the day after the first loss, and stop for the day once closed losses reach 3% of the day-start balance.
 7. **Time / news / spread filters:** 09:00–20:00 server time (Friday until 14:00), no new entry 60 min before/after high-impact XAU/USD news, max spread $0.60.
-8. The on-chart comment shows the H1 trend, why the EA is (not) trading right now, the live spread and ATR SL against their limits, and the all-time win rate / net P/L of this magic number. With `InpDebugLog` on, the Experts tab gets one line per M15 bar saying why no trade was opened; if a valid signal appeared while the time/news/spread/daily-limit filter was blocking, that line ends in `SELL signal SKIPPED` (or BUY) and the chart shows it as "Last skipped signal". If a signal fires but the order isn't placed (SL too large, broker rejection), the status reads `NOT opened - see Experts log`.
+8. **Win rate is counted per position**, not per deal: with partial close one trade has two exit deals, which would otherwise be double-counted. The on-chart stats, the daily loss limit and the optimisation score all use the per-position net result (including entry commission and swap).
+9. The on-chart comment shows the H1 trend, why the EA is (not) trading right now, the live spread and ATR SL against their limits, and the all-time win rate / net P/L of this magic number. With `InpDebugLog` on, the Experts tab gets one line per M15 bar saying why no trade was opened; if a valid signal appeared while the time/news/spread/daily-limit filter was blocking, that line ends in `SELL signal SKIPPED` (or BUY) and the chart shows it as "Last skipped signal". If a signal fires but the order isn't placed (SL too large, broker rejection), the status reads `NOT opened - see Experts log`.
 
 **Price units, not points:** spread, SL clamps and the break-even lock are in price units (USD for XAUUSD), not broker points. XAUUSD is quoted with 2 digits by some brokers and 3 by others, so a points limit sized for one is 10× off on the other — the first version's 40-point spread limit blocked every trade on 3-digit gold quotes. Orders also use the symbol's own filling mode (`SetTypeFillingBySymbol`), since many brokers reject the CTrade default (FOK) on gold.
 
@@ -160,6 +163,7 @@ The win rate comes from three things: trading only *with* the H1 trend, a TP tha
 |---|---|---|
 | `InpEMAFastH1` / `InpEMASlowH1` | 50 / 200 | H1 trend EMAs |
 | `InpADXPeriodH1` / `InpADXMinH1` | 14 / 15 | H1 ADX period and minimum strength (0 = off) |
+| `InpUseH4Filter` / `InpEMAH4` | true / 50 | Require the last H4 close on the trend side of the H4 EMA |
 | `InpEntryTimeframe` | M15 | Entry timeframe |
 | `InpRSIPeriod` | 14 | RSI period on the entry TF |
 | `InpRSIBuyLevel` / `InpRSISellLevel` | 45 / 55 | RSI level the pullback must reach (BUY: at/below, SELL: at/above) |
@@ -168,6 +172,9 @@ The win rate comes from three things: trading only *with* the H1 trend, a TP tha
 | `InpMaxTriggerBarATR` | 1.5 | Skip signals whose trigger bar range > ATR × this (0 = off) |
 | `InpATRPeriod` | 14 | ATR period on the entry TF |
 | `InpSLATRMult` / `InpTPATRMult` | 2.0 / 1.0 | SL and TP distance as ATR multiples |
+| `InpUsePartialClose` | true | Close part of the position at TP1, let the rest run to TP2 |
+| `InpPartialPercent` | 50 | % of the volume closed at TP1 |
+| `InpTP2ATRMult` | 2.5 | TP2 (broker TP of the runner) = ATR × this; `InpTPATRMult` is then TP1 |
 | `InpMinSLPrice` / `InpMaxSLPrice` | 3.0 / 40.0 | SL clamp in price units ($); trade skipped above the max |
 | `InpUseBreakEven` | true | Enable break-even |
 | `InpBETriggerPercent` | 60 | % of the TP distance that triggers break-even |
